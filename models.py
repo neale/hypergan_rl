@@ -40,7 +40,7 @@ class Model(nn.Module):
 
     
     def _fetch_ensemble(self):
-        codes = torch.randn(5, self.ensemble_size, 32).to(self.device)
+        codes = torch.randn(5, self.ensemble_size, 64).to(self.device)
         self.ensemble = self.hypergan.generator(codes)
         
 

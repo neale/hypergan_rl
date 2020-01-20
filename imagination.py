@@ -43,8 +43,8 @@ class Imagination:
 
         i = torch.arange(n_act).to(self.model.device)
         j = torch.randint(es, size=(n_act,)).to(self.model.device)
-        #next_states = self.model.sample(next_state_means[i, j], next_state_vars[i, j])          # shape: (n_actors, d_state)
-        next_states = next_state_means[i, j]          # shape: (n_actors, d_state)
+        next_states = self.model.sample(next_state_means[i, j], next_state_vars[i, j])          # shape: (n_actors, d_state)
+        #next_states = next_state_means[i, j]          # shape: (n_actors, d_state)
 
         if torch.any(torch.isnan(next_states)).item():
             warnings.warn("NaN in sampled next states!")

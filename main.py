@@ -34,7 +34,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-writer = SummaryWriter(log_dir='runs/ant/var_32net')
+writer = SummaryWriter(log_dir='runs/ant/sample_preds')
 
 k = 0
 l = 0

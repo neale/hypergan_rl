@@ -87,7 +87,7 @@ class SimpleVarianceUtility(UtilityMeasure):
         means, vars = next_state_means, next_state_vars
         means = means.double()  # (n_actors, ensemble size, d_state)
         utility = means.var(-1).sum(-1) ## false reward
-        # utility = means.var(1).sum(-1) ## right version of the reward
+        #utility = means.var(1).sum(-1) ## right version of the reward
         #print (utility.shape)
         return utility
 
