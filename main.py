@@ -34,7 +34,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-writer = SummaryWriter(log_dir='runs/ant/sample_preds')
+log_dir = 'runs/ant/neverfetch_std_1e3'
+writer = SummaryWriter(log_dir=log_dir)
+print ('writing to', log_dir)
 
 k = 0
 l = 0
@@ -104,10 +106,10 @@ def model_arch_config():
 # noinspection PyUnusedLocal
 @ex.config
 def model_training_config():
-    exploring_model_epochs = 50                    # number of training epochs in each training phase during exploration
+    exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
-    learning_rate = 1e-3                            # learning rate for training models
+    learning_rate = 1e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
@@ -152,9 +154,10 @@ def exploration():
 
     model_train_freq = 25                           # interval in steps for training models. if `np.inf`, models are trained after every episode
 
-    # utility_measure = 'renyi_div'                   # measure for calculating exploration utility of a particular (state, action). 'cp_stdev', 'renyi_div'
-    # utility_measure = 'traj_stdev'  # var                # measure for calculating exploration utility of a particular (state, action). 'cp_stdev', 'renyi_div'
-    utility_measure =  'var'                # measure for calculating exploration utility of a particular (state, action). 'cp_stdev', 'renyi_div'
+    # utility_measure = 'renyi_div'                 # measure for calculating exploration utility of a particular (state, action)
+    # utility_measure = 'traj_stdev'
+    # utility_measure = 'cp_stdev'
+    utility_measure =  'var'               
     renyi_decay = 0.1                               # decay to be used in calculating Renyi entropy
 
     utility_action_norm_penalty = 0                 # regularize to actions even when exploring
@@ -254,13 +257,15 @@ def train_epoch(model, buffer, optimizer, n_layers, batch_size, training_noise_s
     losses = []
     for tr_states, tr_actions, tr_state_deltas in buffer.train_batches(batch_size=batch_size):
  
+        gen_loss = model.loss(tr_states, tr_actions, tr_state_deltas, training_noise_stdev=training_noise_stdev)
+        
         for i, m in enumerate(optimizer):
             m.zero_grad()
-          
-        gen_loss = model.loss(tr_states, tr_actions, tr_state_deltas, training_noise_stdev=training_noise_stdev)
+        
         if gen_loss[1] is not None:
-            loss, layers, svgd = gen_loss
-            autograd.backward(layers, grad_tensors=svgd.detach())
+            loss, particle_values, svgd = gen_loss
+            autograd.backward(particle_values, grad_tensors=svgd.detach())
+            loss = loss.mean()
         else:
             loss = gen_loss[0]
             loss.backward()
@@ -458,6 +463,7 @@ def transition_novelty(state, action, next_state, model, renyi_decay):
         mu, var = model.forward_all(state, action)
     #measure = JensenRenyiDivergenceUtilityMeasure(decay=renyi_decay)
     measure = SimpleVarianceUtility()
+    #measure = CompoundProbabilityStdevUtilityMeasure()
     v = measure(state, action, next_state, mu, var, model)
     return v.item()
 

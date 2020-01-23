@@ -39,23 +39,34 @@ class Imagination:
 
         # get next state distribution for all models
         with torch.no_grad():
-            next_state_means, next_state_vars = self.model.forward_all(self.states, actions)    # shape: (n_actors, ensemble_size, d_state)
+            #next_state_means, next_state_vars = self.model.forward_all(self.states, actions)    # shape: (n_actors, ensemble_size, d_state)
+            preds, preds1 = self.model.forward_all(self.states, actions)    # shape: (n_actors, ensemble_size, d_state)
 
         i = torch.arange(n_act).to(self.model.device)
         j = torch.randint(es, size=(n_act,)).to(self.model.device)
+        #print (preds.shape)
+        x = preds.transpose(0, 1).var(0)
+        #print (preds[0, 0, :])
+        #print (preds[1, 0, :])
+        #print (preds[2, 0, :])
+        next_state_means = preds.mean(1, keepdim=True).repeat(1, self.ensemble_size, 1)
+        next_state_vars = preds.var(1, keepdim=True).repeat(1, self.ensemble_size, 1)
         next_states = self.model.sample(next_state_means[i, j], next_state_vars[i, j])          # shape: (n_actors, d_state)
+        # print ('ns', next_states.shape)
         #next_states = next_state_means[i, j]          # shape: (n_actors, d_state)
 
         if torch.any(torch.isnan(next_states)).item():
             warnings.warn("NaN in sampled next states!")
             print ('states were: ')
             print ('u, v: ', next_state_means[i, j], next_state_vars[i, j])
+            print (preds)
 
 
         if torch.any(torch.isinf(next_states)).item():
             warnings.warn("Inf in sampled next states!")
             print ('states were: ')
             print ('u, v: ', next_state_means[i, j], next_state_vars[i, j])
+            print (preds)
 
         # compute measure
         measures = self.measure(self.states,                                         # shape: (n_actors, d_state)
@@ -80,6 +91,7 @@ class Imagination:
         states = states.to(self.model.device)
         self.steps = 0
         self.states = states                    # shape: (n_actors, d_state)
+        # self.model._fetch_ensemble()
         return states
 
     def update_init_state(self, state):

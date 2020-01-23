@@ -7,7 +7,7 @@ def swish(x):
     return x * torch.sigmoid(x)
 
 nh = 64
-ni = 64
+ni = 32
 no = 512
 
 class GeneratorW1(nn.Module):
@@ -15,17 +15,13 @@ class GeneratorW1(nn.Module):
         super(GeneratorW1, self).__init__()
         self.d_action = d_action
         self.d_state = d_state
-        self.linear1 = nn.Linear(nh, nh, bias=False)
+        self.linear1 = nn.Linear(ni, nh, bias=False)
         self.linear2 = nn.Linear(nh, nh, bias=False)
         self.linear3 = nn.Linear(nh, no * (d_action+d_state) + no, bias=False) # [pop, 25, nh], [pop, 1, nh]
-        self.bn1 = nn.BatchNorm1d(nh)
-        self.bn2 = nn.BatchNorm1d(nh)
 
     def forward(self, x):
-        #x = F.leaky_relu(self.bn2(self.linear1(x)))
-        #x = F.leaky_relu(self.bn2(self.linear2(x)))
         x = F.leaky_relu(self.linear1(x))
-        x = F.leaky_relu(self.linear2(x))
+        #x = F.leaky_relu(self.linear2(x))
         x = self.linear3(x)
         w, b = x[:, :no*(self.d_action+self.d_state)], x[:, -no:]
         w = w.view(-1, no, self.d_action+self.d_state)
@@ -36,17 +32,13 @@ class GeneratorW1(nn.Module):
 class GeneratorW2(nn.Module):
     def __init__(self):
         super(GeneratorW2, self).__init__()
-        self.linear1 = nn.Linear(nh, nh, bias=False)
+        self.linear1 = nn.Linear(ni, nh, bias=False)
         self.linear2 = nn.Linear(nh, nh, bias=False)
         self.linear3 = nn.Linear(nh, no*no + no, bias=False)
-        self.bn1 = nn.BatchNorm1d(nh)
-        self.bn2 = nn.BatchNorm1d(nh)
 
     def forward(self, x):
-        #x = F.leaky_relu(self.bn1(self.linear1(x)))
-        #x = F.leaky_relu(self.bn2(self.linear2(x)))
         x = F.leaky_relu(self.linear1(x))
-        x = F.leaky_relu(self.linear2(x))
+        #x = F.leaky_relu(self.linear2(x))
         x = self.linear3(x)
         w, b = x[:, :no*no], x[:, -no:]
         w = w.view(-1, no, no)
@@ -57,17 +49,13 @@ class GeneratorW2(nn.Module):
 class GeneratorW3(nn.Module):
     def __init__(self):
         super(GeneratorW3, self).__init__()
-        self.linear1 = nn.Linear(nh, nh, bias=False)
+        self.linear1 = nn.Linear(ni, nh, bias=False)
         self.linear2 = nn.Linear(nh, nh, bias=False)
         self.linear3 = nn.Linear(nh, no*no + no, bias=False)
-        self.bn1 = nn.BatchNorm1d(nh)
-        self.bn2 = nn.BatchNorm1d(nh)
 
     def forward(self, x):
-        #x = F.leaky_relu(self.bn1(self.linear1(x)))
-        #x = F.leaky_relu(self.bn2(self.linear2(x)))
         x = F.leaky_relu(self.linear1(x))
-        x = F.leaky_relu(self.linear2(x))
+        #x = F.leaky_relu(self.linear2(x))
         x = self.linear3(x)
         w, b = x[:, :no*no], x[:, -no:]
         w = w.view(-1, no, no)
@@ -78,17 +66,13 @@ class GeneratorW3(nn.Module):
 class GeneratorW4(nn.Module):
     def __init__(self):
         super(GeneratorW4, self).__init__()
-        self.linear1 = nn.Linear(nh, nh, bias=False)
+        self.linear1 = nn.Linear(ni, nh, bias=False)
         self.linear2 = nn.Linear(nh, nh, bias=False)
         self.linear3 = nn.Linear(nh, no*no + no, bias=False)
-        self.bn1 = nn.BatchNorm1d(nh)
-        self.bn2 = nn.BatchNorm1d(nh)
 
     def forward(self, x):
-        #x = F.leaky_relu(self.bn1(self.linear1(x)))
-        #x = F.leaky_relu(self.bn2(self.linear2(x)))
         x = F.leaky_relu(self.linear1(x))
-        x = F.leaky_relu(self.linear2(x))
+        #x = F.leaky_relu(self.linear2(x))
         x = self.linear3(x)
         w, b = x[:, :no*no], x[:, -no:]
         w = w.view(-1, no, no)
@@ -100,19 +84,15 @@ class GeneratorW5(nn.Module):
     def __init__(self, d_state):
         super(GeneratorW5, self).__init__()
         self.d_state = d_state
-        self.linear1 = nn.Linear(nh, nh, bias=False)
+        self.linear1 = nn.Linear(ni, nh, bias=False)
         self.linear2 = nn.Linear(nh, nh, bias=False)
         self.linear3 = nn.Linear(nh, no*d_state + d_state, bias=False)
-        self.bn1 = nn.BatchNorm1d(nh)
-        self.bn2 = nn.BatchNorm1d(nh)
 
     def forward(self, x):
-        #x = F.leaky_relu(self.bn1(self.linear1(x)))
-        #x = F.leaky_relu(self.bn2(self.linear2(x)))
         x = F.leaky_relu(self.linear1(x))
-        x = F.leaky_relu(self.linear2(x))
+        #x = F.leaky_relu(self.linear2(x))
         x = self.linear3(x)
-        w, b = x[:, :no*(self.d_state)], x[:, -(self.d_state):]
+        w, b = x[:, :no*self.d_state], x[:, -self.d_state:]
         w = w.view(-1, self.d_state, no)
         b = b.view(-1, 1, self.d_state)
         return (w, b)
@@ -121,6 +101,12 @@ def orthogonal_init(model):
     for m in model.modules():
         if isinstance(m, (nn.Conv2d, nn.Linear)):
             nn.init.orthogonal_(m.weight)
+
+def normal_init(model):
+    for m in model.modules():
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            nn.init.kaiming_normal_(m.weight)
+
 
 class HyperGAN(HyperGAN_Base):
     
@@ -138,6 +124,7 @@ class HyperGAN(HyperGAN_Base):
             
             for m in [self.W1, self.W2, self.W3, self.W4, self.W5]:
                 m.apply(orthogonal_init)
+                # m.apply(normal_init)
 
         def __call__(self, x):
             w1, b1 = self.W1(x[0])

@@ -169,11 +169,11 @@ class Model(nn.Module):
 
     """ Amortized Stein Variational Gradient Descent Ops """
     def svgd_batch_vectorized(self, means_zj, targets):
-        alpha = 1e-3
+        alpha = 1e2
         svgd_sum, loss, kappa_sum = 0, 0, 0
         
         log_probs = F.mse_loss(means_zj, targets)  # calculate log probs
-        log_probs.backward(retain_graph=True)
+        #log_probs.backward(retain_graph=True)
         logp_z = autograd.grad(log_probs.sum(), means_zj)[0]  # [particles, batch, d_output]
         layers = [] # put the ensemble into a sensible list of layers
         for item in self.ensemble:

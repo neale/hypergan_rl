@@ -46,8 +46,9 @@ class CompoundProbabilityStdevUtilityMeasure(UtilityMeasure):
     def compute_utility(self, states, actions, next_states, next_state_means, next_state_vars, model):
         mu, var = next_state_means, next_state_vars                           # shape: both (n_actors, ensemble_size, d_state)
 
-        utility = mu.std(dim=1)                                               # shape: (n_actors, d_state)
+        utility = mu.std(dim=-1)                                               # shape: (n_actors, d_state)
         utility = utility.sum(dim=1)                                          # shape: (n_actors)
+        # utility = utility * 1e3
         return utility
 
 
@@ -86,8 +87,9 @@ class SimpleVarianceUtility(UtilityMeasure):
     def compute_utility(self, states, actions, next_states, next_state_means, next_state_vars, model):
         means, vars = next_state_means, next_state_vars
         means = means.double()  # (n_actors, ensemble size, d_state)
-        utility = means.var(-1).sum(-1) ## false reward
-        #utility = means.var(1).sum(-1) ## right version of the reward
+        # utility = means.var(-1).sum(-1) ## false reward
+        utility = means.var(1) ## right version of the reward
+        utility = utility.sum(1)
         #print (utility.shape)
         return utility
 

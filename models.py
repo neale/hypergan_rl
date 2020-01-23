@@ -34,16 +34,23 @@ class Model(nn.Module):
         self.ensemble_size = ensemble_size
         self.device = device
         
+        self.normal = torch.distributions.Normal(loc=torch.zeros(32), scale=torch.ones(32))
+        self.uniform = torch.distributions.Uniform(low=torch.zeros(32), high=torch.ones(32))
+        probs = torch.ones(32)/float(32)
+        self.categorical = torch.distributions.OneHotCategorical(probs=probs)
+    
         self._fetch_ensemble()  
-        
         self.to(device)
 
     
-    def _fetch_ensemble(self):
-        codes = torch.randn(5, self.ensemble_size, 64).to(self.device)
-        self.ensemble = self.hypergan.generator(codes)
+    def _fetch_ensemble(self, resample=True):
+        #codes = torch.rand(5, self.ensemble_size, 64).to(self.device)
+        if resample:
+            #print ('resampling models')
+            self.codes = self.normal.sample([self.ensemble_size])
+            self.codes = self.codes.unsqueeze(0).repeat(5, 1, 1).to(self.device)
+        self.ensemble = self.hypergan.generator(self.codes)
         
-
     def setup_normalizer(self, normalizer):
         self.normalizer = TransitionNormalizer()
         self.normalizer.set_state(normalizer.get_state())
@@ -74,15 +81,15 @@ class Model(nn.Module):
             delta_mean = self.normalizer.denormalize_state_delta_means(delta_mean)
             var = self.normalizer.denormalize_state_delta_vars(var)
         return delta_mean, var
-    def _propagate_network(self, states, actions, return_preds=None, for_loss=False):
-        self._fetch_ensemble()
-        inp = torch.cat((states, actions), dim=2)
-        means, stds, preds = [], [], []
- 
-        preds = self.hypergan.eval_all(self.ensemble, inp) ## (32, 256, 31)
+    
+    def _propagate_network(self, states, actions, return_preds=None, for_loss=False, sample=True):
+        self._fetch_ensemble(resample=True)
+        inputs = torch.cat((states, actions), dim=-1)
+        means, stds, preds = [], [], [] 
+        preds = self.hypergan.eval_all(self.ensemble, inputs) ## (32, 256, 31)
         delta_mean = preds.mean(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
         var = preds.var(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
-        if inp.shape[1] == 1: # utility measurement
+        if inputs.shape[1] == 1: # real env step
             if for_loss is True:
                 return preds
             else:
@@ -92,60 +99,11 @@ class Model(nn.Module):
             if for_loss is True:
                 return preds
             else:
-                return delta_mean, var
+                #return delta_mean, var
+                return preds, preds
         else:
             return preds
-
-    """
-    def _propagate_network(self, states, actions, return_preds=None, for_loss=False):
-        self._fetch_ensemble()
-        inp = torch.cat((states, actions), dim=2)
-        means, stds, preds = [], [], []
- 
-        if inp.shape[1] == 1: # utility measurement
-            #preds = [self.hypergan.eval_f(layer, inp[i]) for (i, layer) in enumerate(zip(*self.ensemble))]
-            preds = self.hypergan.eval_all(self.ensemble, inp)
-            #preds = torch.stack(preds).view(-1, self.d_state)
-            mean = preds.mean(0).unsqueeze(0)
-            if for_loss is True:
-                #return mean
-                return preds
-            else:
-                #var = preds.var(0).unsqueeze(0)
-                #return mean, var
-                return preds, preds
-
-        if not return_preds:
-            if for_loss is True:
-                #for batch_set in inp: ## batch x states
-                    #chunks = torch.stack([self.hypergan.eval_f(layer, batch_set) for layer in zip(*self.ensemble)])
-                    #means.append(chunks)
-                chunks = self.hypergan.eval_all(self.ensemble, inp) ## (32, 256, 31)
-                #delta_mean = torch.stack(chunks).mean(0) ## ensemble size x batch size x d_state
-                return chunks
-            else:
-                #for batch_set in inp: ## batch x states
-                    #chunks = torch.stack([self.hypergan.eval_f(layer, batch_set) for layer in zip(*self.ensemble)])
-                    #means.append(chunks)
-                    #stds.append(chunks)
-                chunks = self.hypergan.eval_all(self.ensemble, inp)
-                #means.append(chunks)
-                #stds.append(chunks)
-
-                #delta_mean = torch.stack(means) ## ensemble size x batch size x d_state
-                #delta_mean = delta_mean.mean(0)
-                #var = torch.stack(stds) ## ensemble size x batch size x d_state
-                #var = var.var(0)
-                delta_mean = chunks.mean(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
-                var = chunks.var(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
-
-                return delta_mean, var
-
-        else:
-            #preds = [self.hypergan.eval_f(layer, inp[i]) for (i, layer) in enumerate(zip(*self.ensemble))]
-            preds = self.hypergan.eval_all(self.ensemble, inp)
-            return torch.stack(preds)
-    """
+    
     def forward(self, states, actions):
         """
         predict next state mean and variance.
@@ -206,7 +164,7 @@ class Model(nn.Module):
         svgd_sum, loss, kappa_sum = 0, 0, 0
         
         log_probs = F.mse_loss(means_zj, targets)  # calculate log probs
-        log_probs.backward(retain_graph=True)
+        # log_probs.backward(retain_graph=True)
         logp_z = autograd.grad(log_probs.sum(), means_zj)[0]  # [particles, batch, d_output]
         layers = [] # put the ensemble into a sensible list of layers
         for item in self.ensemble:
@@ -223,40 +181,37 @@ class Model(nn.Module):
         logp_z = logp_z.mean(0).mean(-1)  # [particles, 1]
         kernel_logp = torch.matmul(kappa.detach(), logp_z)  # [particles, 1]
 
-        svgd = (kernel_logp + alpha * grad_kappa) / self.ensemble_size  # [particles, params]
+        svgd = (kernel_logp + alpha * grad_kappa)# / self.ensemble_size  # [particles, params]
         
         svgd_val = svgd.mean().item()
         kappa_val = kappa.mean().item()
         log_probs_val = log_probs.mean()
-        
         return log_probs, layers, svgd
     
     """ not used yet, can't get the dimensions to work out, but shoudl push predictions apart (SVGD) """
-    def svgd_batch_values(self, means_zj, targets):
-        alpha = .1
-        svgd_sum, loss, kappa_sum = 0, 0, 0
-        
+    def svgd_batch_values(self, means_zj, means_zi, targets):
+        alpha = 1e-3
         means_zj = means_zj.transpose(0, 1)  # [batch, particles, state]
+        means_zi = means_zi.transpose(0, 1)  # [batch, particles, state]
         targets = targets.transpose(0, 1)  # [batch, particles, state]
-        means, means_frozen = torch.split(means_zj, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
-        targets, targets_frozen = torch.split(targets, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
-        means_frozen.detach()   
-        targets_frozen.detach()
 
-        log_probs = F.mse_loss(means, targets, reduction='none')  # calculate log probs
+        #means, means_frozen = torch.split(means_zj, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
+        #targets, targets_frozen = torch.split(targets, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
+        means_zi.detach()   
+        #targets_frozen.detach()
         
-        logp_grad = autograd.grad(log_probs.sum(), inputs=means)[0]  # [particles, batch, d_output]
-        # logp_grad = logp_grad.unsqueeze(2)
-        print (logp_grad.shape)
-
-        kappa, grad_kappa = batch_rbf_xy(means_frozen, means)
-        # kappa = kappa.unsqueeze(-1)
-        print (kappa.shape, logp_grad.shape, log_probs.shape)
-        
+        log_probs = F.mse_loss(means_zj, targets, reduction='none')  # calculate log probs
+        logp_grad = autograd.grad(log_probs.sum(), inputs=means_zj)[0]  # [particles, batch, d_output]
+        logp_grad = logp_grad.unsqueeze(2)
+        kappa, grad_kappa = batch_rbf_xy(means_zi, means_zj)
+        kappa = kappa.unsqueeze(-1)
+        #print ('kappa', kappa.shape, kappa.mean().item())
+        ##print ('gk: ', grad_kappa.shape, grad_kappa.mean().item())
+        #print ('log_probs', log_probs.shape, log_probs.mean().item())
+        #print ('logp grads', logp_grad.shape, logp_grad.mean().item())
         kernel_logp = torch.matmul(kappa.detach(), logp_grad)
         svgd = (kernel_logp + alpha * grad_kappa).mean(1)
-        return log_probs, means, svgd
-
+        return log_probs, means_zj, svgd
 
 
     def loss(self, states, actions, state_deltas, training_noise_stdev=0):
@@ -275,23 +230,36 @@ class Model(nn.Module):
             loss (torch 0-dim tensor): `.backward()` can be called on it to compute gradients
         """
         svgd = True
+        theta = False
+        values = True
+        if svgd:
+            if theta:
+                svgd_batch_fn = self.svgd_batch_params
+            elif values:
+                svgd_batch_fn = self.svgd_batch_values
+
         states, actions = self._pre_process_model_inputs(states, actions)
         targets = self._pre_process_model_targets(state_deltas)
-
+        # self._fetch_ensemble()
         if not np.allclose(training_noise_stdev, 0):
             states += torch.randn_like(states) * training_noise_stdev
             actions += torch.randn_like(actions) * training_noise_stdev
             targets += torch.randn_like(targets) * training_noise_stdev
+        
         if not svgd:
             # negative log likelihood
             means = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
             loss = F.mse_loss(means, targets)
-            loss = (loss, None, None)
+            ret = (loss, None, None)
+        
         else:
+            means_zi = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
+            # try resampling
             means_zj = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
-            preds, means, svgd = self.svgd_batch_theta(means_zj, targets)
-            loss = (preds, means, svgd)
-        return loss
+            loss, particle_values, svgd = svgd_batch_fn(means_zj, means_zi, targets)
+            ret = (loss, particle_values, svgd)
+        
+        return ret
 
 
     def likelihood(self, states, actions, next_states):
