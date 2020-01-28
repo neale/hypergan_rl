@@ -6,8 +6,8 @@ from hypergan_base import HyperGAN_Base
 def swish(x):
     return x * torch.sigmoid(x)
 
-nh = 64
-ni = 32
+nh = 16
+ni = 16
 no = 512
 
 class GeneratorW1(nn.Module):

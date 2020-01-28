@@ -34,7 +34,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/ant/svgd_preds_a1e-3_lr3e-4'
+log_dir = 'runs/ant/svgd_preds_a1e-3_lr3e-4_16ih_means1'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -79,7 +79,7 @@ def infra_config():
     checkpoint_frequency = 2000                     # dump buffer with normalizer every checkpoint_frequency steps
 
     disable_cuda = False                            # if true: do not ues cuda even though its available
-    omp_num_threads = 32                           # for high CPU count machines
+    omp_num_threads = 1                           # for high CPU count machines
 
     if not disable_cuda and torch.cuda.is_available():
         device = torch.device('cuda')
@@ -109,7 +109,7 @@ def model_training_config():
     exploring_model_epochs = 50                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
-    learning_rate = 3e-4                            # learning rate for training models
+    learning_rate = 2e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
@@ -602,9 +602,9 @@ def evaluate_utility(buffer, exploring_model_epochs, model_train_freq, n_eval_ep
 @ex.capture
 def checkpoint(buffer, step_num, dump_dir, _run):
     buffer_file = f'{dump_dir}/{step_num}.buffer'
-    #with gzip.open(buffer_file, 'wb') as f:
-    #    pickle.dump(buffer, f)
-    #_run.add_artifact(buffer_file)
+    with gzip.open(buffer_file, 'wb') as f:
+        pickle.dump(buffer, f)
+    _run.add_artifact(buffer_file)
 
 
 """

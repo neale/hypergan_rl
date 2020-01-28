@@ -34,7 +34,7 @@ class Model(nn.Module):
         self.ensemble_size = ensemble_size
         self.device = device
         
-        self.normal = torch.distributions.Normal(loc=torch.zeros(32), scale=torch.ones(32))
+        self.normal = torch.distributions.Normal(loc=torch.zeros(16), scale=torch.ones(16))
         self.uniform = torch.distributions.Uniform(low=torch.zeros(32), high=torch.ones(32))
         probs = torch.ones(32)/float(32)
         self.categorical = torch.distributions.OneHotCategorical(probs=probs)
