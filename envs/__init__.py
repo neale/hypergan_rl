@@ -15,7 +15,8 @@ register(
 register(
     id='MagellanHalfCheetah-v2',
     entry_point='envs.half_cheetah:MagellanHalfCheetahEnv',
-    max_episode_steps=100
+    max_episode_steps=1000,
+    reward_threshold=4800.0
 )
 
 register(
