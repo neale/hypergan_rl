@@ -12,7 +12,6 @@ LOG_STD_MIN = -20
 LOG_STD_MAX = 2
 EPS = 1e-6
 
-
 def copy_tensor(x):
     return x.clone().detach().cpu()
 
@@ -320,7 +319,9 @@ class SAC(nn.Module):
             next_states, rewards, done, _ = env.step(actions)
             self.replay.add(states, actions, rewards, next_states)
             if verbosity >= 3 and _log is not None:
-                _log.info(f'step_reward. mean: {torch.mean(rewards).item():5.2f} +- {torch.std(rewards).item():.2f} [{torch.min(rewards).item():5.2f}, {torch.max(rewards).item():5.2f}]')
+                _log.info(
+                    f'step_reward. mean: {torch.mean(rewards).item():5.2f} +- {torch.std(rewards).item():.2f} \
+                        [{torch.min(rewards).item():5.2f}, {torch.max(rewards).item():5.2f}]')
 
             ep_returns += torch.mean(rewards).item()
             ep_length += 1

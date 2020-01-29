@@ -55,15 +55,27 @@ class MagellanHalfCheetahEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         """
 
         self.prev_x_torso = None
+        self.external_reward = True
         dir_path = os.path.dirname(os.path.realpath(__file__))
         mujoco_env.MujocoEnv.__init__(self, '%s/assets/half_cheetah.xml' % dir_path, 5)
         utils.EzPickle.__init__(self)
 
+    def turn_on_external_reward(self):
+        self.external_reward = True
+
     def step(self, action):
         self.prev_x_torso = np.copy(self.get_body_com("torso")[0:1])
+        xposbefore = self.sim.data.qpos[0]
         self.do_simulation(action, self.frame_skip)
+        xposafter = self.sim.data.qpos[0]
         ob = self._get_obs()
-        return ob, None, False, {}
+        if self.external_reward:
+            reward_ctrl = - 0.1 * np.square(action).sum()
+            reward_run = (xposafter - xposbefore) / self.dt
+            reward = reward_ctrl + reward_run
+        else:
+            reward = 0.0
+        return ob, reward, False, {}
 
     def _get_obs(self):
         z_position = self.sim.data.qpos.flat[1:2]

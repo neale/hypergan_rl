@@ -51,7 +51,7 @@ class Imagination:
         #print (preds[2, 0, :])
         next_state_means = preds.mean(1, keepdim=True).repeat(1, self.ensemble_size, 1)
         next_state_vars = preds.var(1, keepdim=True).repeat(1, self.ensemble_size, 1)
-        #next_states = self.model.sample(next_state_means[i, j], next_state_vars[i, j])          # shape: (n_actors, d_state)
+        # next_states = self.model.sample(next_state_means[i, j], next_state_vars[i, j])          # shape: (n_actors, d_state)
         # print ('ns', next_states.shape)
         next_states = next_state_means[i, j]          # shape: (n_actors, d_state)
 
