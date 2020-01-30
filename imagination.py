@@ -64,10 +64,17 @@ class Imagination:
 
         if torch.any(torch.isinf(next_states)).item():
             warnings.warn("Inf in sampled next states!")
-            print ('states were: ')
-            print ('u, v: ', next_state_means[i, j], next_state_vars[i, j])
-            print (preds)
-
+            resample=True
+            while resample:
+                print ('resampling')
+                with torch.no_grad():
+                    preds, preds1 = self.model.forward_all(self.states, actions)
+                i = torch.arange(n_act).to(self.model.device)
+                j = torch.randint(es, size=(n_act,)).to(self.model.device)
+                next_state_means = preds.mean(1, keepdim=True).repeat(1, self.ensemble_size, 1)
+                next_states = next_state_means[i, j]
+                if not torch.any(torch.isinf(next_states)).item():
+                    resample = False
         # compute measure
         measures = self.measure(self.states,                                         # shape: (n_actors, d_state)
                                 actions,                                             # shape: (n_actors, d_action)
