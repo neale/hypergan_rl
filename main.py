@@ -34,7 +34,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/ant/svgd_preds_a1e-3_lr3e-4_16ih_means1'
+log_dir = 'runs/block/a1e-3_lr2e-4_32i16h_means_100_grad4_4'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -53,6 +53,7 @@ def config():
 @ex.config
 def env_config():
     env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    env_base = env_name
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
@@ -62,8 +63,11 @@ def env_config():
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
-    env = gym.make(env_name)
-    d_state = env.observation_space.shape[0]        # dimensionality of state
+    env = gym.make(env_base)
+    if isinstance(env.observation_space, gym.spaces.dict.Dict):
+        d_state = env.observation_space['observation'].shape[0]
+    else:
+        d_state = env.observation_space.shape[0]
     d_action = env.action_space.shape[0]            # dimensionality of action
     del env
 
@@ -106,14 +110,14 @@ def model_arch_config():
 # noinspection PyUnusedLocal
 @ex.config
 def model_training_config():
-    exploring_model_epochs = 50                    # number of training epochs in each training phase during exploration
+    exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
     learning_rate = 2e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
-    grad_clip = 5                                   # gradient clipping to train model
+    grad_clip = 4                                   # gradient clipping to train model
 
 
 # noinspection PyUnusedLocal
@@ -525,7 +529,7 @@ def evaluate_tasks(buffer, step_num, n_eval_episodes, evaluation_model_epochs, r
         return coverage
 
     if rotation_coverage:
-        from envs.handblock import rottation_buffer
+        from envs.handblock import rotation_buffer
         coverage = rotation_buffer(buffer=buffer)
         writer.add_scalar("coverage", coverage, step_num)
         _run.result = coverage

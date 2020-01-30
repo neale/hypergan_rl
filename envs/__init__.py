@@ -6,7 +6,11 @@ register(
     entry_point='envs.ant:MagellanAntEnv',
     max_episode_steps=300
 )
-
+register(
+    id='IntrinsicHandBlock-v0',
+    entry_point='envs.handblock:IntrinsicHandBlockEnv',
+    max_episode_steps=300
+)
 
 register(
     id='MagellanHalfCheetah-v2',

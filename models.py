@@ -34,7 +34,7 @@ class Model(nn.Module):
         self.ensemble_size = ensemble_size
         self.device = device
         
-        self.normal = torch.distributions.Normal(loc=torch.zeros(16), scale=torch.ones(16))
+        self.normal = torch.distributions.Normal(loc=torch.zeros(32), scale=torch.ones(32))
         self.uniform = torch.distributions.Uniform(low=torch.zeros(32), high=torch.ones(32))
         probs = torch.ones(32)/float(32)
         self.categorical = torch.distributions.OneHotCategorical(probs=probs)
@@ -194,21 +194,12 @@ class Model(nn.Module):
         means_zj = means_zj.transpose(0, 1)  # [batch, particles, state]
         means_zi = means_zi.transpose(0, 1)  # [batch, particles, state]
         targets = targets.transpose(0, 1)  # [batch, particles, state]
-
-        #means, means_frozen = torch.split(means_zj, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
-        #targets, targets_frozen = torch.split(targets, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
         means_zi.detach()   
-        #targets_frozen.detach()
-        
         log_probs = F.mse_loss(means_zj, targets, reduction='none')  # calculate log probs
         logp_grad = autograd.grad(log_probs.sum(), inputs=means_zj)[0]  # [particles, batch, d_output]
         logp_grad = logp_grad.unsqueeze(2)
         kappa, grad_kappa = batch_rbf_xy(means_zi, means_zj)
         kappa = kappa.unsqueeze(-1)
-        #print ('kappa', kappa.shape, kappa.mean().item())
-        ##print ('gk: ', grad_kappa.shape, grad_kappa.mean().item())
-        #print ('log_probs', log_probs.shape, log_probs.mean().item())
-        #print ('logp grads', logp_grad.shape, logp_grad.mean().item())
         kernel_logp = torch.matmul(kappa.detach(), logp_grad)
         svgd = (kernel_logp + alpha * grad_kappa).mean(1)
         return log_probs, means_zj, svgd
@@ -261,28 +252,3 @@ class Model(nn.Module):
         
         return ret
 
-
-    def likelihood(self, states, actions, next_states):
-        """
-        input raw (un-normalized) states, actions and state_deltas
-
-        Args:
-            states (torch tensor): (ensemble_size, batch size, dim_state)
-            actions (torch tensor): (ensemble_size, batch size, dim_action)
-            next_states (torch tensor): (ensemble_size, batch size, dim_state)
-
-        Returns:
-            likelihood (torch tensor): (batch size)
-        """
-
-        next_states = next_states.to(self.device)
-
-        with torch.no_grad():
-            mu, var = self(states, actions)     # next state and variance
-
-        pdf = Normal(mu, torch.sqrt(var))
-        log_likelihood = pdf.log_prob(next_states)
-
-        log_likelihood = log_likelihood.mean(dim=2).mean(dim=0)     # mean over all state components and models
-
-        return log_likelihood
