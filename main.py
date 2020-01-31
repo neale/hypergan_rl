@@ -61,7 +61,7 @@ def env_config():
     n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
-    eval_freq = 200000                                # interval in steps for evaluating models on tasks in the environment
+    eval_freq = 100                                # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
@@ -132,6 +132,7 @@ def policy_config():
     policy_replay_size = int(1e7)                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
     policy_reactive_updates = 100                   # number of SAC off-policy updates of `batch_size`
+    policy_initial_updates = 5000
     policy_active_updates = 1                       # number of SAC on-policy updates per step in the imagination/environment
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
@@ -339,7 +340,8 @@ def get_policy(buffer, model, measure, mode,
                 lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
-    agent.setup_normalizer(model.normalizer)
+    if model is not None:
+        agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
         return agent
@@ -364,6 +366,23 @@ def get_policy(buffer, model, measure, mode,
     return agent
 
 
+@ex.capture
+def transfer_buffer_to_agent(buffer, agent, device, verbosity):
+    size = len(buffer)
+    for i in range(0, size, 1024):
+        j = min(i + 1024, size)
+        s, a = buffer.states[i:j], buffer.actions[i:j]
+        ns = buffer.states[i:j] + buffer.state_deltas[i:j]
+        s, a, ns = s.to(device), a.to(device), ns.to(device)
+        r = buffer.rewards[i:j].to(device)
+        agent.replay.add(s, a, r, ns)
+
+    if verbosity:
+        _log.info("... transferred exploration buffer")
+
+    return agent
+
+
 def get_action(mdp, agent):
     current_state = mdp.reset()
     actions = agent(current_state, eval=True)
@@ -373,16 +392,14 @@ def get_action(mdp, agent):
 
 @ex.capture
 def train(env, agent, n_train_steps, verbosity, env_horizon, _run, _log): 
-    agent.reset_replay()
+    # agent.reset_replay()
     ep_returns = []
     n_episodes = int(n_train_steps / env_horizon)
     for ep_i in range(n_episodes):
         # ep_return = agent.rewrad_episode(env=env, reward_func=reward_function, verbosity=verbosity, _log=_log)
         ep_return = agent.episode(env=TorchEnv(env), verbosity=verbosity, _log=_log)
         ep_returns.append(ep_return)
-
-        step_return = ep_return / env_horizon
-        _log.info(f"\tep: {ep_i}\taverage step return: {np.round(step_return, 3)}")
+        _log.info(f"\tep: {ep_i}\taverage step return: {np.round(ep_return, 3)}")
 
     return max(ep_returns)
 
@@ -410,8 +427,7 @@ def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive
         ep_returns.append(ep_return)
 
         if verbosity:
-            step_return = ep_return / policy_explore_horizon
-            _log.info(f"\tep: {ep_i}\taverage step return: {np.round(step_return, 3)}")
+            _log.info(f"\tep: {ep_i}\taverage step return: {np.round(ep_return, 3)}")
 
     return agent
     
@@ -657,6 +673,25 @@ def checkpoint(buffer, step_num, dump_dir, _run):
     _run.add_artifact(buffer_file)
 
 
+@ex.capture
+def evaluate_agent(agent, step_num, n_eval_episodes):
+    env = get_env()
+    env = TorchEnv(env)
+    ep_returns = []
+    for ep_idx in range(n_eval_episodes):
+        ep_return = 0
+        state = env.reset()
+        done = False
+        while not done:
+            action = agent(state, eval=True)
+            next_state, reward, done, _ = env.step(action)
+            ep_return += reward.squeeze().detach().data.cpu().numpy()
+            state = next_state
+        ep_returns.append(ep_return)
+
+    return np.mean(ep_returns)
+
+
 """
 Main Functions
 """
@@ -664,7 +699,7 @@ Main Functions
 
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps, model_train_freq, exploring_model_epochs,
-                       eval_freq, checkpoint_frequency, render, record, dump_dir, _config, _log, _run):
+                       policy_initial_updates, eval_freq, checkpoint_frequency, render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
     env.seed(seed)
@@ -706,7 +741,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
 
         # real env rollout
         next_state, reward, done, info = env.step(action)
-        buffer.add(state, action, next_state)
+        buffer.add(state, action, reward, next_state)
 
         if step_num > n_warm_up_steps:
             writer.add_scalar("experience_novelty", transition_novelty(state, action, next_state, model=model), step_num)
@@ -748,19 +783,30 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         #     average_performance = evaluate_tasks(buffer=buffer, step_num=step_num)
         #     average_performances.append(average_performance)
 
+        # if (step_num % eval_freq) == 0 and step_num > n_warm_up_steps:
+        #     avg_return = evaluate_agent(agent, step_num)
+        #     _log.info(f"evaluate:\taverage return: {np.round(avg_return, 4)}")
+        #     writer.add_scalar(f"evaluate_return", avg_return, step_num)
+
         time_to_checkpoint = ((step_num % checkpoint_frequency) == 0)
         if time_to_checkpoint:
             checkpoint(buffer=buffer, step_num=step_num)
 
-    _log.info(f"intrinsic training finished")
-    if agent is None:
-        agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
+    _log.info(f"intrinsic exploration done")
+    agent = None
+    agent = get_policy(buffer=buffer, model=None, measure=None, policy_lr=3e-4, mode='exploit', buffer_reuse=False)
+    agent = transfer_buffer_to_agent(buffer, agent)
+    for update_idx in range(policy_initial_updates):
+        agent.update()
+    # if agent is None:
+    #     agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
     _log.info(f"starting extrinsic training")
     max_return = train(env=env, agent=agent) 
 
     if record:
         _run.add_artifact(video_filename)
 
+    # return avg_return
     return max_return
     # return max(average_performances)
 
