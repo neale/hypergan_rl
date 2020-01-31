@@ -23,6 +23,7 @@ class Buffer:
 
         self.states = torch.zeros(buffer_size, d_state).float()
         self.actions = torch.zeros(buffer_size, d_action).float()
+        self.rewards = torch.zeros(buffer_size).float()
         self.state_deltas = torch.zeros(buffer_size, d_state).float()
 
         self.normalizer = None
@@ -32,17 +33,21 @@ class Buffer:
     def setup_normalizer(self, normalizer):
         self.normalizer = normalizer
 
-    def add(self, state, action, next_state):
+    def add(self, state, action, reward, next_state):
         """
         add transition to buffer
 
         Args:
             state: numpy vector of (d_state,) shape
             action: numpy vector of (d_action,) shape
+            reward: scalar of () shape
             next_state: numpy vector of (d_state,) shape
 
         """
-        state, action, next_state = torch.from_numpy(state).float().clone(), torch.from_numpy(action).float().clone(), torch.from_numpy(next_state).float().clone()
+        state = torch.from_numpy(state).float().clone()
+        action = torch.from_numpy(action).float().clone()
+        reward = torch.from_numpy(np.array(reward)).float().clone()
+        next_state = torch.from_numpy(next_state).float().clone()
 
         state_delta = next_state - state
 
@@ -50,6 +55,7 @@ class Buffer:
 
         self.states[idx] = state
         self.actions[idx] = action
+        self.rewards[idx] = reward
         self.state_deltas[idx] = state_delta
 
         self._n_elements += 1
