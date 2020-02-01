@@ -158,7 +158,7 @@ def policy_config():
 def exploration():
     exploration_mode = 'active'                     # active or reactive
 
-    model_train_freq = 25                           # interval in steps for training models. if `np.inf`, models are trained after every episode
+    model_train_freq = 200                           # interval in steps for training models. if `np.inf`, models are trained after every episode
     explore_rollout_freq = 50
     n_explore_rollout_steps = 10
 
@@ -434,7 +434,7 @@ def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive
     
 
 @ex.capture
-def act(state, agent, mdp, buffer, model, measure, mode, exploration_mode,
+def act(state, agent, buffer, model, measure, mode, exploration_mode,
         policy_actors, policy_warm_up_episodes, use_best_policy,
         policy_explore_horizon, policy_exploit_horizon,
         policy_explore_episodes, policy_exploit_episodes,
@@ -449,28 +449,8 @@ def act(state, agent, mdp, buffer, model, measure, mode, exploration_mode,
     else:
         raise Exception("invalid acting mode")
 
-    # fresh_agent = True if agent is None else False
-    fresh_mdp = True if mdp is None else False
-    if fresh_mdp:
-        #print ('creating imaginary mdp')
-        mdp = Imagination(horizon=policy_horizon, n_actors=policy_actors, model=model, measure=measure)
-
-    #if fresh_agent:
-    #    #rint ('getting new agent')
-    #    agent = get_policy(buffer=buffer, model=model, measure=measure, mode=mode)
-
-    # update state to current env state
+    mdp = Imagination(horizon=policy_horizon, n_actors=policy_actors, model=model, measure=measure)
     mdp.update_init_state(state)
-
-    if not fresh_mdp:
-        return mdp, agent
-        # agent is not stale, use it to return action
-        #print ('returning action -- old agent')
-        # return get_action(mdp, agent)
-
-    # # reactive updates
-    # for update_idx in range(policy_reactive_updates):
-    #     agent.update()
 
     # active updates
     perform_active_exploration = (mode == 'explore' and exploration_mode == 'active')
@@ -486,7 +466,7 @@ def act(state, agent, mdp, buffer, model, measure, mode, exploration_mode,
         ep_returns = []
         best_return, best_params = -np.inf, deepcopy(agent.state_dict())
         for ep_i in range(policy_episodes):
-            warm_up = True if ((ep_i < policy_warm_up_episodes) and fresh_mdp) else False
+            warm_up = True if (ep_i < policy_warm_up_episodes) else False
             ep_return = agent.episode(env=mdp, warm_up=warm_up, verbosity=verbosity, _log=_log)
             ep_returns.append(ep_return)
 
@@ -514,8 +494,7 @@ def act(state, agent, mdp, buffer, model, measure, mode, exploration_mode,
             writer.add_scalar("policy_improvement_second_last_delta", (last_return - ep_returns[1]) / policy_horizon)
             writer.add_scalar("policy_improvement_median_last_delta", (last_return - np.median(ep_returns)) / policy_horizon)
             """
-    return mdp, agent
-    # return get_action(mdp, agent)
+    return agent
 
 
 """
@@ -702,8 +681,9 @@ Main Functions
 
 
 @ex.capture
-def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps, model_train_freq, 
-                       agent_train_freq, explore_rollout_freq, n_explore_rollout_steps, 
+def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps,  
+                       model_train_freq, agent_train_freq, 
+                       explore_rollout_freq, n_explore_rollout_steps, 
                        policy_batch_size, agent_batch_size, device,
                        exploring_model_epochs, policy_reactive_updates, eval_freq, checkpoint_frequency, 
                        render, record, dump_dir, _config, _log, _run):
@@ -720,13 +700,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         normalizer = TransitionNormalizer()
         buffer.setup_normalizer(normalizer)
 
-    model = None
-    mdp = None
-    # agent = None
     agent = get_policy(buffer=buffer, model=None, measure=None, 
                        policy_batch_size=agent_batch_size, policy_lr=3e-4, 
-                       mode='exploit', buffer_reuse=False)
-    explore_agent = None
+                       mode='explore', buffer_reuse=False)
     average_performances = []
     explore_rollout_step_num = n_exploration_steps
 
@@ -737,43 +713,22 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         state = env.reset()
 
     for step_num in range(1, n_exploration_steps + 1):
-        # policy_values = []
-        action_norms = []
+        # real env rollout
         if step_num > n_warm_up_steps:
             if step_num % explore_rollout_freq == 0:
-                _log.info(f"step: {step_num},\texploration_policy training and rollout")
-                mdp = None
-                explore_agent = deepcopy(agent)
-                explore_agent.set_batch_size(policy_batch_size)
+                _log.info(f"step: {step_num},\texploration_policy rollout")
                 explore_rollout_step_num = 0
-
             if explore_rollout_step_num < n_explore_rollout_steps:
-                explore_rollout_step_num += 1
-                mdp, explore_agent = act(state=state, 
-                                         agent=explore_agent, 
-                                         mdp=mdp, 
-                                         buffer=buffer, 
-                                         model=model, 
-                                         measure=exploration_measure, 
-                                         mode='explore')
-                
                 action = explore_agent(state, eval=True)
-                # writer.add_scalar("action_norm", np.sum(np.square(action)), step_num)
-                # writer.add_scalar("exploration_policy_value", policy_value, step_num)
-                #_log.info('exploration policy value: {}'.format(policy_value))
-                #_log.info("action norm: {}".format(np.sum(np.square(action))))
+                explore_rollout_step_num += 1
             else:
                 action = agent(state, eval=True)
-
             if action_noise_stdev:
-                # action = action + np.random.normal(scale=action_noise_stdev, size=action.shape)
                 action = action + action_noise_stdev * torch.randn(action.shape)
-
         else:
             action = env.action_space.sample()
             action = torch.from_numpy(action).float().to(device)
 
-        # real env rollout
         next_state, reward, done, _ = env.step(action)
         buffer.add(state, action, reward, next_state)
 
@@ -796,22 +751,29 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         if step_num < n_warm_up_steps:
             continue
 
+        # train dynamic model and exploration policy 
         train_at_end_of_episode = (model_train_freq is np.inf)
         time_to_update = ((step_num % model_train_freq) == 0)
         just_finished_warm_up = (step_num == n_warm_up_steps)
         if (train_at_end_of_episode and done) or time_to_update or just_finished_warm_up:
+            _log.info(f"step: {step_num},\tdynamic_model and exploration_policy training")
             model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num, mode='explore')
+            explore_agent = deepcopy(agent)
+            explore_agent.set_batch_size(policy_batch_size)
+            explore_agent = act(state=state, 
+                                agent=explore_agent, 
+                                buffer=buffer, 
+                                model=model, 
+                                measure=exploration_measure, 
+                                mode='explore')
             
+        # train task policy
         if step_num % agent_train_freq == 0 or just_finished_warm_up:
             _log.info(f"step: {step_num},\ttask_policy training")
             for update_idx in range(policy_reactive_updates):
                 agent.update(buffer.sample(agent.batch_size))
 
-        # time_to_evaluate = ((step_num % eval_freq) == 0)
-        # if time_to_evaluate or just_finished_warm_up:
-        #     average_performance = evaluate_tasks(buffer=buffer, step_num=step_num)
-        #     average_performances.append(average_performance)
-
+        # evaluate taks policy
         if (step_num % eval_freq) == 0 and step_num > n_warm_up_steps:
             avg_return = evaluate_agent(agent, step_num)
             _log.info(f"step: {step_num}, evaluate:\taverage return = {np.round(avg_return, 4)}")
