@@ -92,8 +92,9 @@ class Imagination:
         return next_states, measures, done, {}
 
     def reset(self):
-        states = torch.from_numpy(self.init_state).float()
-        states = states.unsqueeze(0)
+        # states = torch.from_numpy(self.init_state).float()
+        # states = states.unsqueeze(0)
+        states = self.init_state
         states = states.repeat(self.n_actors, 1)
         states = states.to(self.model.device)
         self.steps = 0

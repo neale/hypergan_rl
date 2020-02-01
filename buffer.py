@@ -4,6 +4,8 @@ import torch
 
 import warnings
 
+def copy_tensor(x):
+    return x.clone().detach().cpu()
 
 class Buffer:
     def __init__(self, d_state, d_action, ensemble_size, buffer_size):
@@ -44,10 +46,10 @@ class Buffer:
             next_state: numpy vector of (d_state,) shape
 
         """
-        state = torch.from_numpy(state).float().clone()
-        action = torch.from_numpy(action).float().clone()
-        reward = torch.from_numpy(np.array(reward)).float().clone()
-        next_state = torch.from_numpy(next_state).float().clone()
+        state = copy_tensor(state)
+        action = copy_tensor(action)
+        reward = copy_tensor(reward)
+        next_state = copy_tensor(next_state)
 
         state_delta = next_state - state
 
@@ -65,6 +67,17 @@ class Buffer:
 
         if self._n_elements >= self.buffer_size:
             warnings.warn("buffer full, rewriting over old samples")
+
+    def sample(self, batch_size):
+        idxs = np.random.randint(len(self), size=batch_size)
+        states = self.states[idxs] 
+        actions = self.actions[idxs]
+        rewards = self.rewards[idxs]
+        next_states = self.state_deltas[idxs] + states
+        # if self.normalizer is not None:
+        #     states = self.normalizer.normalize_states(states)
+        #     next_states = self.normalizer.normalize_states(next_states)
+        return states, actions, rewards, next_states, torch.ones(batch_size, 1)
 
     def train_batches(self, batch_size):
         """

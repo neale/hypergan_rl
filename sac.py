@@ -237,6 +237,9 @@ class SAC(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    def set_batch_size(self, batch_size):
+        self.batch_size = batch_size
+
     def setup_normalizer(self, normalizer):
         self.normalizer = normalizer
         self.replay.setup_normalizer(normalizer)
@@ -255,9 +258,10 @@ class SAC(nn.Module):
     def reset_replay(self):
         self.replay.clear()
 
-    def update(self):
+    def update(self, sample=None):
         global i
-        sample = self.replay.sample(self.batch_size)
+        if sample is None:
+            sample = self.replay.sample(self.batch_size)
         states, actions, rewards, next_states, masks = [s.to(self.device) for s in sample]
 
         q1, q2 = self.qf(states, actions)
