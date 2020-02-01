@@ -682,9 +682,7 @@ Main Functions
 
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps,  
-                       model_train_freq, agent_train_freq, 
-                       explore_rollout_freq, n_explore_rollout_steps, 
-                       policy_batch_size, agent_batch_size, device,
+                       agent_train_freq, policy_batch_size, agent_batch_size, device,
                        exploring_model_epochs, policy_reactive_updates, eval_freq, checkpoint_frequency, 
                        render, record, dump_dir, _config, _log, _run):
 
@@ -715,14 +713,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     for step_num in range(1, n_exploration_steps + 1):
         # real env rollout
         if step_num > n_warm_up_steps:
-            if step_num % explore_rollout_freq == 0:
-                _log.info(f"step: {step_num},\texploration_policy rollout")
-                explore_rollout_step_num = 0
-            if explore_rollout_step_num < n_explore_rollout_steps:
-                action = explore_agent(state, eval=True)
-                explore_rollout_step_num += 1
-            else:
-                action = agent(state, eval=True)
+            action = agent(state, eval=True)
             if action_noise_stdev:
                 action = action + action_noise_stdev * torch.randn(action.shape)
         else:
@@ -751,24 +742,8 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         if step_num < n_warm_up_steps:
             continue
 
-        # train dynamic model and exploration policy 
-        train_at_end_of_episode = (model_train_freq is np.inf)
-        time_to_update = ((step_num % model_train_freq) == 0)
-        just_finished_warm_up = (step_num == n_warm_up_steps)
-        if (train_at_end_of_episode and done) or time_to_update or just_finished_warm_up:
-            _log.info(f"step: {step_num},\tdynamic_model and exploration_policy training")
-            model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num, mode='explore')
-            explore_agent = deepcopy(agent)
-            explore_agent.set_batch_size(policy_batch_size)
-            explore_agent = act(state=state, 
-                                agent=explore_agent, 
-                                buffer=buffer, 
-                                model=model, 
-                                measure=exploration_measure, 
-                                mode='explore')
-            
         # train task policy
-        if step_num % agent_train_freq == 0 or just_finished_warm_up:
+        if step_num % agent_train_freq == 0 or step_num == n_warm_up_steps:
             _log.info(f"step: {step_num},\ttask_policy training")
             for update_idx in range(policy_reactive_updates):
                 agent.update(buffer.sample(agent.batch_size))
