@@ -61,7 +61,7 @@ def env_config():
     n_exploration_steps = 1000000                    # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
-    eval_freq = 1000                                 # interval in steps for evaluating models on tasks in the environment
+    eval_freq = 100                                 # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
@@ -126,12 +126,12 @@ def policy_config():
     policy_actors = 128                             # number of parallel actors in imagination MDP
     policy_warm_up_episodes = 3                     # number of episodes with random actions before SAC on-policy data is collected (as a part of init)
 
-    policy_replay_size = int(1e7)                   # SAC replay size
+    policy_replay_size = int(1e6)                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
-    policy_reactive_updates = 20                   # number of SAC off-policy updates of `batch_size`
+    policy_reactive_updates = 1                   # number of SAC off-policy updates of `batch_size`
     # policy_initial_updates = 5000
     policy_active_updates = 1                       # number of SAC on-policy updates per step in the imagination/environment
-    agent_train_freq = 10
+    agent_train_freq = 1
     agent_batch_size = 256
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
@@ -691,18 +691,11 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     env.seed(seed)
     atexit.register(lambda: env.close())
 
-    buffer = get_buffer()
     exploration_measure = get_utility_measure()
 
-    if _config['normalize_data']:
-        normalizer = TransitionNormalizer()
-        buffer.setup_normalizer(normalizer)
-
-    agent = get_policy(buffer=buffer, model=None, measure=None, 
+    agent = get_policy(buffer=None, model=None, measure=None, 
                        policy_batch_size=agent_batch_size, policy_lr=3e-4, 
                        mode='explore', buffer_reuse=False)
-    average_performances = []
-    explore_rollout_step_num = n_exploration_steps
 
     if record:
         video_filename = f"{dump_dir}/exploration_0.mp4"
@@ -713,15 +706,17 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     for step_num in range(1, n_exploration_steps + 1):
         # real env rollout
         if step_num > n_warm_up_steps:
-            action = agent(state, eval=True)
-            if action_noise_stdev:
-                action = action + action_noise_stdev * torch.randn(action.shape)
+            with torch.no_grad():
+                action = agent(state)
+            # if action_noise_stdev:
+            #     action = action + action_noise_stdev * torch.randn(action.shape)
         else:
             action = env.action_space.sample()
             action = torch.from_numpy(action).float().to(device)
+            action = action.unsqueeze(0)
 
         next_state, reward, done, _ = env.step(action)
-        buffer.add(state, action, reward, next_state)
+        agent.replay.add(state, action, reward, next_state)
 
         if render:
             env.render()
@@ -744,9 +739,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
 
         # train task policy
         if step_num % agent_train_freq == 0 or step_num == n_warm_up_steps:
-            _log.info(f"step: {step_num},\ttask_policy training")
-            for update_idx in range(policy_reactive_updates):
-                agent.update(buffer.sample(agent.batch_size))
+            # _log.info(f"step: {step_num},\ttask_policy training")
+            for _ in range(policy_reactive_updates):
+                agent.update()
 
         # evaluate taks policy
         if (step_num % eval_freq) == 0 and step_num > n_warm_up_steps:
@@ -754,9 +749,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
             _log.info(f"step: {step_num}, evaluate:\taverage return = {np.round(avg_return, 4)}")
             writer.add_scalar(f"evaluate_return", avg_return, step_num)
 
-        time_to_checkpoint = ((step_num % checkpoint_frequency) == 0)
-        if time_to_checkpoint:
-            checkpoint(buffer=buffer, step_num=step_num)
+        # time_to_checkpoint = ((step_num % checkpoint_frequency) == 0)
+        # if time_to_checkpoint:
+        #     checkpoint(buffer=buffer, step_num=step_num)
 
     if record:
         _run.add_artifact(video_filename)
