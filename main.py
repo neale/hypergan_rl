@@ -61,7 +61,7 @@ def env_config():
     n_exploration_steps = 1000000                    # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
-    eval_freq = 100                                 # interval in steps for evaluating models on tasks in the environment
+    eval_freq = 500                                 # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
@@ -126,13 +126,15 @@ def policy_config():
     policy_actors = 128                             # number of parallel actors in imagination MDP
     policy_warm_up_episodes = 3                     # number of episodes with random actions before SAC on-policy data is collected (as a part of init)
 
-    policy_replay_size = int(1e6)                   # SAC replay size
+    policy_replay_size = int(1e+6) + 1                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
-    policy_reactive_updates = 1                   # number of SAC off-policy updates of `batch_size`
+    policy_reactive_updates = 100                   # number of SAC off-policy updates of `batch_size`
     # policy_initial_updates = 5000
     policy_active_updates = 1                       # number of SAC on-policy updates per step in the imagination/environment
     agent_train_freq = 1
     agent_batch_size = 256
+    agent_active_updates = 1
+    explore_agent_updates = 1000
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
     policy_lr = 1e-3                                # SAC learning rate
@@ -158,9 +160,9 @@ def policy_config():
 def exploration():
     exploration_mode = 'active'                     # active or reactive
 
-    model_train_freq = 200                           # interval in steps for training models. if `np.inf`, models are trained after every episode
-    explore_rollout_freq = 50
-    n_explore_rollout_steps = 10
+    model_train_freq = 1000                           # interval in steps for training models. if `np.inf`, models are trained after every episode
+    explore_rollout_freq = 100
+    n_explore_rollout_steps = 20
 
     # utility_measure = 'renyi_div'                 # measure for calculating exploration utility of a particular (state, action)
     # utility_measure = 'traj_stdev'
@@ -368,14 +370,18 @@ def get_policy(buffer, model, measure, mode,
 
 
 @ex.capture
-def transfer_buffer_to_agent(buffer, agent, device, verbosity):
+def transfer_buffer_to_agent(buffer, agent, model, measure, device, verbosity):
+    agent.reset_replay()
     size = len(buffer)
-    for i in range(0, size, 1024):
-        j = min(i + 1024, size)
+    for i in range(0, size, 1000):
+        j = min(i + 1000, size)
         s, a = buffer.states[i:j], buffer.actions[i:j]
         ns = buffer.states[i:j] + buffer.state_deltas[i:j]
         s, a, ns = s.to(device), a.to(device), ns.to(device)
-        r = buffer.rewards[i:j].to(device)
+        # r = buffer.rewards[i:j].to(device)
+        with torch.no_grad():
+            mu, var = model.forward_all(s, a)
+        r = measure(s, a, ns, mu, var, model)
         agent.replay.add(s, a, r, ns)
 
     if verbosity:
@@ -682,8 +688,11 @@ Main Functions
 
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps,  
-                       agent_train_freq, policy_batch_size, agent_batch_size, device,
-                       exploring_model_epochs, policy_reactive_updates, eval_freq, checkpoint_frequency, 
+                       agent_train_freq, model_train_freq, 
+                       n_explore_rollout_steps, explore_rollout_freq,
+                       policy_batch_size, agent_batch_size, device,
+                       agent_active_updates, explore_agent_updates,
+                       exploring_model_epochs, eval_freq, checkpoint_frequency, 
                        render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
@@ -691,11 +700,18 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     env.seed(seed)
     atexit.register(lambda: env.close())
 
+    buffer = get_buffer()
     exploration_measure = get_utility_measure()
+
+    if _config['normalize_data']:
+        normalizer = TransitionNormalizer()
+        buffer.setup_normalizer(normalizer)
 
     agent = get_policy(buffer=None, model=None, measure=None, 
                        policy_batch_size=agent_batch_size, policy_lr=3e-4, 
                        mode='explore', buffer_reuse=False)
+
+    explore_rollout_step_num = n_explore_rollout_steps
 
     if record:
         video_filename = f"{dump_dir}/exploration_0.mp4"
@@ -706,16 +722,24 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     for step_num in range(1, n_exploration_steps + 1):
         # real env rollout
         if step_num > n_warm_up_steps:
-            with torch.no_grad():
-                action = agent(state)
-            # if action_noise_stdev:
-            #     action = action + action_noise_stdev * torch.randn(action.shape)
+            if step_num % explore_rollout_freq == 0:
+                explore_rollout_step_num = 0
+            if explore_rollout_step_num < n_explore_rollout_steps:
+                with torch.no_grad():
+                    action = explore_agent(state)
+                explore_rollout_step_num += 1
+                if action_noise_stdev:
+                    action = action + action_noise_stdev * torch.randn(action.shape)
+            else:
+                with torch.no_grad():
+                    action = agent(state)
         else:
             action = env.action_space.sample()
             action = torch.from_numpy(action).float().to(device)
             action = action.unsqueeze(0)
 
         next_state, reward, done, _ = env.step(action)
+        buffer.add(state, action, next_state)
         agent.replay.add(state, action, reward, next_state)
 
         if render:
@@ -737,11 +761,26 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         if step_num < n_warm_up_steps:
             continue
 
+        just_finished_warm_up = (step_num == n_warm_up_steps)
         # train task policy
-        if step_num % agent_train_freq == 0 or step_num == n_warm_up_steps:
+        if step_num % agent_train_freq == 0 or just_finished_warm_up:
             # _log.info(f"step: {step_num},\ttask_policy training")
-            for _ in range(policy_reactive_updates):
+            for _ in range(agent_active_updates):
                 agent.update()
+
+        # train dynamic model and exploration policy
+        if step_num % model_train_freq == 0 or just_finished_warm_up:
+            _log.info(f"step: {step_num}, \tdynamic_model training")
+            model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num, mode='explore')
+            _log.info(f"step: {step_num}, \texplore_policy training")
+            explore_agent = deepcopy(agent)
+            explore_agent.set_batch_size(policy_batch_size)
+            explore_agent = transfer_buffer_to_agent(buffer=buffer, 
+                                                     agent=explore_agent,
+                                                     model=model,
+                                                     measure=exploration_measure)
+            for _ in range(explore_agent_updates):
+                explore_agent.update()
 
         # evaluate taks policy
         if (step_num % eval_freq) == 0 and step_num > n_warm_up_steps:
