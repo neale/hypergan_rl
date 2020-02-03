@@ -61,7 +61,7 @@ def env_config():
     n_exploration_steps = 1000000                    # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
-    eval_freq = 100                                 # interval in steps for evaluating models on tasks in the environment
+    eval_freq = 500                                 # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
@@ -86,6 +86,7 @@ def infra_config():
 
     if not disable_cuda and torch.cuda.is_available():
         device = torch.device('cuda')
+        # torch.set_default_tensor_type('torch.cuda.FloatTensor')
     else:
         device = torch.device('cpu')
 
@@ -128,14 +129,13 @@ def policy_config():
 
     policy_replay_size = int(1e6)                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
-    policy_reactive_updates = 1                   # number of SAC off-policy updates of `batch_size`
-    # policy_initial_updates = 5000
-    policy_active_updates = 1                       # number of SAC on-policy updates per step in the imagination/environment
+    policy_active_updates = 1                       # number of SAC on-policy updates per environment step 
+    agent_active_updates = 1
     agent_train_freq = 1
     agent_batch_size = 256
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
-    policy_lr = 1e-3                                # SAC learning rate
+    policy_lr = 3e-4                                # SAC learning rate
     policy_gamma = 0.99                             # discount factor for SAC
     policy_tau = 0.005                              # soft target network update mixing factor
 
@@ -145,7 +145,8 @@ def policy_config():
     # exploration
     policy_explore_horizon = 50                     # length of sampled trajectories (planning horizon)
     policy_explore_episodes = 50                    # number of iterations of SAC before each episode
-    policy_explore_alpha = 0.02                     # entropy scaling factor in SAC for exploration (utility maximisation)
+    policy_explore_alpha = 1.0                      # entropy scaling factor in SAC for explorationn   
+    policy_reward_scale = 5.0
 
     # exploitation
     policy_exploit_horizon = 100                    # length of sampled trajectories (planning horizon)
@@ -326,10 +327,11 @@ Planning
 
 
 @ex.capture
-def get_policy(buffer, model, measure, mode,
-               d_state, d_action, policy_replay_size, policy_batch_size, policy_active_updates,
-               policy_n_hidden, policy_lr, policy_gamma, policy_tau, policy_explore_alpha, policy_exploit_alpha, buffer_reuse,
-               device, verbosity, _log):
+def get_policy(buffer, model, measure, mode, d_state, d_action, 
+               policy_replay_size, policy_batch_size, policy_active_updates,
+               policy_n_hidden, policy_lr, policy_gamma, policy_tau, 
+               policy_explore_alpha, policy_exploit_alpha, policy_reward_scale,
+               buffer_reuse, device, verbosity, _log):
 
     if verbosity:
         _log.info("... getting fresh agent")
@@ -338,7 +340,7 @@ def get_policy(buffer, model, measure, mode,
 
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
                 n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
-                lr=policy_lr, tau=policy_tau)
+                reward_scale=policy_reward_scale, lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
     # if model is not None:
@@ -391,47 +393,6 @@ def get_action(mdp, agent):
     policy_value = torch.mean(agent.get_state_value(current_state)).item()
     return action, mdp, agent, policy_value
 
-@ex.capture
-def train(env, agent, n_train_steps, verbosity, env_horizon, _run, _log): 
-    # agent.reset_replay()
-    ep_returns = []
-    n_episodes = int(n_train_steps / env_horizon)
-    for ep_i in range(n_episodes):
-        # ep_return = agent.rewrad_episode(env=env, reward_func=reward_function, verbosity=verbosity, _log=_log)
-        ep_return = agent.episode(env=TorchEnv(env), verbosity=verbosity, _log=_log)
-        ep_returns.append(ep_return)
-        _log.info(f"\tep: {ep_i}\taverage step return: {np.round(ep_return, 3)}")
-
-    return max(ep_returns)
-
-@ex.capture
-def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive_updates,
-        policy_warm_up_episodes, policy_explore_horizon, policy_explore_episodes, 
-        verbosity, _run, _log):
-
-    mdp = Imagination(horizon=policy_explore_horizon, 
-            n_actors=policy_actors, model=model, measure=measure)
-    agent = get_policy(buffer=buffer, model=model, measure=measure, mode='explore')
-
-    mdp.update_init_state(state)
-    
-    # reactive updates
-    for update_idx in range(policy_reactive_updates):
-        agent.update()
-        
-    # active training
-    agent.reset_replay()
-    ep_returns = []
-    for ep_i in range(policy_explore_episodes):
-        warm_up = True if (ep_i < policy_warm_up_episodes) else False
-        ep_return = agent.episode(env=mdp, warm_up=warm_up, verbosity=verbosity, _log=_log)
-        ep_returns.append(ep_return)
-
-        if verbosity:
-            _log.info(f"\tep: {ep_i}\taverage step return: {np.round(ep_return, 3)}")
-
-    return agent
-    
 
 @ex.capture
 def act(state, agent, buffer, model, measure, mode, exploration_mode,
@@ -683,7 +644,7 @@ Main Functions
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps,  
                        agent_train_freq, policy_batch_size, agent_batch_size, device,
-                       exploring_model_epochs, policy_reactive_updates, eval_freq, checkpoint_frequency, 
+                       exploring_model_epochs, agent_active_updates, eval_freq, checkpoint_frequency, 
                        render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
@@ -694,7 +655,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     exploration_measure = get_utility_measure()
 
     agent = get_policy(buffer=None, model=None, measure=None, 
-                       policy_batch_size=agent_batch_size, policy_lr=3e-4, 
+                       policy_batch_size=agent_batch_size, 
                        mode='explore', buffer_reuse=False)
 
     if record:
@@ -740,7 +701,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         # train task policy
         if step_num % agent_train_freq == 0 or step_num == n_warm_up_steps:
             # _log.info(f"step: {step_num},\ttask_policy training")
-            for _ in range(policy_reactive_updates):
+            for _ in range(agent_active_updates):
                 agent.update()
 
         # evaluate taks policy
