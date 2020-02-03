@@ -34,7 +34,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/block/a1e-3_lr2e-4_32i16h_means_100_grad4_4'
+log_dir = 'runs/cheetah_tsac/run1'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -86,7 +86,7 @@ def infra_config():
 
     if not disable_cuda and torch.cuda.is_available():
         device = torch.device('cuda')
-        # torch.set_default_tensor_type('torch.cuda.FloatTensor')
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
     else:
         device = torch.device('cpu')
 
@@ -113,7 +113,7 @@ def model_training_config():
     exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
-    learning_rate = 2e-4                            # learning rate for training models
+    learning_rate = 1e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states

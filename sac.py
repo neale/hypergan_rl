@@ -23,6 +23,33 @@ def danger_mask(x):
     return mask
 
 
+
+def fanin_init(tensor):
+    size = tensor.size()
+    if len(size) == 2:
+        fan_in = size[0]
+    elif len(size) > 2:
+        fan_in = np.prod(size[1:])
+    else:
+        raise Exception("Shape must be have dimension at least 2.")
+    bound = 1. / np.sqrt(fan_in)
+    return tensor.data.uniform_(-bound, bound)
+
+
+def fanin_init_weights_like(tensor):
+    size = tensor.size()
+    if len(size) == 2:
+        fan_in = size[0]
+    elif len(size) > 2:
+        fan_in = np.prod(size[1:])
+    else:
+        raise Exception("Shape must be have dimension at least 2.")
+    bound = 1. / np.sqrt(fan_in)
+    new_tensor = FloatTensor(tensor.size())
+    new_tensor.uniform_(-bound, bound)
+    return new_tensor
+
+
 class Replay:
     def __init__(self, d_state, d_action, size):
         self.states = torch.zeros([size, d_state]).float()
@@ -104,6 +131,46 @@ def init_weights(layer):
     nn.init.constant_(layer.bias, 0)
 
 
+def init_weights_rlkit(layer):
+    init_w = 1e-3
+    nn.init.uniform_(layer.weight, -init_w, init_w)
+    nn.init.uniform_(layer.bias, -init_w, init_w) 
+
+
+class ParallelLinear_rlkit(nn.Module):
+    def __init__(self, n_in, n_out, ensemble_size, final_layer=False):
+        super().__init__()
+
+        weights = []
+        biases = []
+        for j in range(ensemble_size):
+            weight = torch.Tensor(n_in, n_out).float()
+            bias = torch.Tensor(1, n_out).float()
+            if final_layer:
+                if j == 0:
+                    nn.init.uniform_(weight, -3e-3, 3e-3)  # mean
+                    nn.init.uniform_(bias, -3e-3, 3e-3)  # mean
+                if j == 1:
+                    nn.init.uniform_(weight, -1e-3, 1e-3) # log std
+                    nn.init.uniform_(bias, -1e-3, 1e-3)  # log std
+            else:
+                fanin_init(weight)
+                bias.fill_(0.1)
+
+            weights.append(weight)
+            biases.append(bias)
+
+        weights = torch.stack(weights)
+        biases = torch.stack(biases)
+
+        self.weights = nn.Parameter(weights)
+        self.biases = nn.Parameter(biases)
+
+    def forward(self, inp):
+        op = torch.baddbmm(self.biases, inp, self.weights)
+        return op
+
+
 class ParallelLinear(nn.Module):
     def __init__(self, n_in, n_out, ensemble_size):
         super().__init__()
@@ -130,6 +197,22 @@ class ParallelLinear(nn.Module):
         return op
 
 
+class ActionValueFunction_rlkit(nn.Module):
+    def __init__(self, d_state, d_action, n_hidden):
+        super().__init__()
+        self.layers = nn.Sequential(ParallelLinear_rlkit(d_state + d_action, n_hidden, ensemble_size=2),
+                                    nn.ReLU(),
+                                    ParallelLinear_rlkit(n_hidden, n_hidden, ensemble_size=2),
+                                    nn.ReLU(),
+                                    ParallelLinear_rlkit(n_hidden, 1, ensemble_size=2, final_layer=True))
+
+    def forward(self, state, action):
+        x = torch.cat([state, action], dim=1)
+        x = x.unsqueeze(0).repeat(2, 1, 1)
+        y1, y2 = self.layers(x)
+        return y1, y2
+
+
 class ActionValueFunction(nn.Module):
     def __init__(self, d_state, d_action, n_hidden):
         super().__init__()
@@ -144,6 +227,33 @@ class ActionValueFunction(nn.Module):
         x = x.unsqueeze(0).repeat(2, 1, 1)
         y1, y2 = self.layers(x)
         return y1, y2
+
+
+class StateValueFunction_rlkit(nn.Module):
+    def __init__(self, d_state, n_hidden):
+        super().__init__()
+        init_w = 3e-3
+        one = nn.Linear(d_state, n_hidden)
+        fanin_init(one.weight)
+        one.bias.data.fill_(0.1)
+        
+        two = nn.Linear(n_hidden, n_hidden)
+        fanin_init(two.weight)
+        two.bias.data.fill_(0.1)
+        
+        three = nn.Linear(n_hidden, 1)
+        three.weight.data.uniform_(-init_w, init_w)
+        three.bias.data.uniform_(-init_w, init_w)
+
+        self.layers = nn.Sequential(one,
+                                    nn.ReLU(),
+                                    two,
+                                    nn.ReLU(),
+                                    three)
+
+    def forward(self, state):
+        result = self.layers(state)
+        return result
 
 
 class StateValueFunction(nn.Module):
@@ -173,16 +283,20 @@ class TanhGaussianPolicy(nn.Module):
         super().__init__()
 
         one = nn.Linear(d_state, n_hidden)
-        init_weights(one)
+        one.bias.data.fill_(0.1)
+        fanin_init(one.weight)
+
         two = nn.Linear(n_hidden, n_hidden)
-        init_weights(two)
+        two.bias.data.fill_(0.1)
+        fanin_init(two.weight)
+
         three = nn.Linear(n_hidden, 2 * d_action)
-        init_weights(three)
+        init_weights_rlkit(three)
 
         self.layers = nn.Sequential(one,
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
                                     two,
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
                                     three)
 
     def forward(self, state):
@@ -229,11 +343,11 @@ class SAC(nn.Module):
 
         self.n_updates = n_updates
 
-        self.qf = ActionValueFunction(self.d_state, d_action, n_hidden)
+        self.qf = ActionValueFunction_rlkit(self.d_state, d_action, n_hidden)
         self.qf_optim = Adam(self.qf.parameters(), lr=lr)
 
-        self.vf = StateValueFunction(self.d_state, n_hidden)
-        self.vf_target = StateValueFunction(self.d_state, n_hidden)
+        self.vf = StateValueFunction_rlkit(self.d_state, n_hidden)
+        self.vf_target = StateValueFunction_rlkit(self.d_state, n_hidden)
         self.vf_optim = Adam(self.vf.parameters(), lr=lr)
         for target_param, param in zip(self.vf_target.parameters(), self.vf.parameters()):
             target_param.data.copy_(param.data)
@@ -275,46 +389,53 @@ class SAC(nn.Module):
             sample = self.replay.sample(self.batch_size)
         states, actions, rewards, next_states, masks = [s.to(self.device) for s in sample]
 
-        q1, q2 = self.qf(states, actions)
-        pi, logp_pi, mu, log_std = self.policy(states)
-        q1_pi, q2_pi = self.qf(states, pi)
-        v_pred = self.vf(states)
+        q1, q2 = self.qf(states, actions) # line 115, 116
+        pi, logp_pi, mu, log_std = self.policy(states) # line 119
+        q1_pi, q2_pi = self.qf(states, pi) # 152, 153
+        v_pred = self.vf(states) # 117
 
         # target value network
-        v_target = self.vf_target(next_states)
+        v_target = self.vf_target(next_states) # 143
 
         # min double-Q:
-        min_q_pi = torch.min(q1_pi, q2_pi)
+        min_q_pi = torch.min(q1_pi, q2_pi) # 151
 
         # targets for Q and V regression
-        q_target = self.reward_scale * rewards + self.gamma * masks * v_target
-        v_backup = min_q_pi - self.alpha * logp_pi
+        q_target = self.reward_scale * rewards + self.gamma * masks * v_target # 144 masks ?= (1-terminals)
+        v_backup = min_q_pi - self.alpha * logp_pi # 155
 
         # policy losses
-        pi_loss = torch.mean(self.alpha * logp_pi - min_q_pi)
+        pi_loss = torch.mean(self.alpha * logp_pi - min_q_pi) # 179
         pi_loss += 0.001 * mu.pow(2).mean()
         pi_loss += 0.001 * log_std.pow(2).mean()
+        # pre_activation_weight=0 so disregard that
 
-        q1_loss = 0.5 * F.mse_loss(q1, q_target.detach())
-        q2_loss = 0.5 * F.mse_loss(q2, q_target.detach())
-        v_loss = 0.5 * F.mse_loss(v_pred, v_backup.detach())
+        # QF Loss
+        #q1_loss = 0.5 * F.mse_loss(q1, q_target.detach())
+        #q2_loss = 0.5 * F.mse_loss(q2, q_target.detach())
+        q1_loss = F.mse_loss(q1, q_target.detach()) # 145
+        q2_loss = F.mse_loss(q2, q_target.detach()) # 146
+
+        # VF Loss
+        # v_loss = 0.5 * F.mse_loss(v_pred, v_backup.detach())
+        v_loss = F.mse_loss(v_pred, v_backup.detach()) # 156
         q_loss = q1_loss + q2_loss
         # value_loss = q1_loss + q2_loss + v_loss
 
         self.policy_optim.zero_grad()
         pi_loss.backward()
-        torch.nn.utils.clip_grad_value_(self.policy.parameters(), self.grad_clip)
+        #torch.nn.utils.clip_grad_value_(self.policy.parameters(), self.grad_clip)
         self.policy_optim.step()
 
         self.qf_optim.zero_grad()
         q_loss.backward()
-        torch.nn.utils.clip_grad_value_(self.qf.parameters(), self.grad_clip)
+        #torch.nn.utils.clip_grad_value_(self.qf.parameters(), self.grad_clip)
         self.qf_optim.step()
 
         self.vf_optim.zero_grad()
         v_loss.backward()
         # value_loss.backward()
-        torch.nn.utils.clip_grad_value_(self.vf.parameters(), self.grad_clip)
+        #torch.nn.utils.clip_grad_value_(self.vf.parameters(), self.grad_clip)
         self.vf_optim.step()
 
         for target_param, param in zip(self.vf_target.parameters(), self.vf.parameters()):
