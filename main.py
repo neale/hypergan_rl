@@ -57,7 +57,7 @@ def env_config():
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
-    n_warm_up_steps = 0                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
     n_exploration_steps = 1000000                    # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
@@ -127,18 +127,18 @@ def policy_config():
     policy_actors = 128                             # number of parallel actors in imagination MDP
     policy_warm_up_episodes = 3                     # number of episodes with random actions before SAC on-policy data is collected (as a part of init)
 
-    policy_replay_size = int(1e6)                   # SAC replay size
+    policy_replay_size = int(1e+6) + 1                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
     policy_active_updates = 1                       # number of SAC on-policy updates per environment step 
     agent_active_updates = 1
     agent_train_freq = 1
     agent_batch_size = 256
+    explore_agent_updates = 1000
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
     policy_lr = 3e-4                                # SAC learning rate
     policy_gamma = 0.99                             # discount factor for SAC
     policy_tau = 0.005                              # soft target network update mixing factor
-    sac_automatic_entropy_tuning = False
 
     buffer_reuse = True                             # transfer the main exploration buffer as off-policy samples to SAC
     use_best_policy = False                         # execute the best policy or the last one
@@ -328,11 +328,10 @@ Planning
 
 
 @ex.capture
-def get_policy(buffer, model, env, measure, mode, d_state, d_action, 
+def get_policy(buffer, model, measure, mode, d_state, d_action, 
                policy_replay_size, policy_batch_size, policy_active_updates,
                policy_n_hidden, policy_lr, policy_gamma, policy_tau, 
                policy_explore_alpha, policy_exploit_alpha, policy_reward_scale,
-               sac_automatic_entropy_tuning,
                buffer_reuse, device, verbosity, _log):
 
     if verbosity:
@@ -342,9 +341,7 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action,
 
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
                 n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
-                reward_scale=policy_reward_scale, lr=policy_lr, tau=policy_tau, 
-                action_space_shape=env.action_space.shape,
-                automatic_entropy_tuning=sac_automatic_entropy_tuning)
+                reward_scale=policy_reward_scale, lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
     # if model is not None:
@@ -374,14 +371,18 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action,
 
 
 @ex.capture
-def transfer_buffer_to_agent(buffer, agent, device, verbosity):
+def transfer_buffer_to_agent(buffer, agent, model, measure, device, verbosity):
+    agent.reset_replay()
     size = len(buffer)
-    for i in range(0, size, 1024):
-        j = min(i + 1024, size)
+    for i in range(0, size, 1000):
+        j = min(i + 1000, size)
         s, a = buffer.states[i:j], buffer.actions[i:j]
         ns = buffer.states[i:j] + buffer.state_deltas[i:j]
         s, a, ns = s.to(device), a.to(device), ns.to(device)
-        r = buffer.rewards[i:j].to(device)
+        # r = buffer.rewards[i:j].to(device)
+        with torch.no_grad():
+            mu, var = model.forward_all(s, a)
+        r = measure(s, a, ns, mu, var, model)
         agent.replay.add(s, a, r, ns)
 
     if verbosity:
@@ -390,12 +391,12 @@ def transfer_buffer_to_agent(buffer, agent, device, verbosity):
     return agent
 
 
-def get_action(mdp, agent):
-    current_state = mdp.reset()
-    actions = agent(current_state, eval=True)
-    action = actions[0].detach().data.cpu().numpy()
-    policy_value = torch.mean(agent.get_state_value(current_state)).item()
-    return action, mdp, agent, policy_value
+# def get_action(mdp, agent):
+#     current_state = mdp.reset()
+#     actions = agent(current_state, eval=True)
+#     action = actions[0].detach().data.cpu().numpy()
+#     policy_value = torch.mean(agent.get_state_value(current_state)).item()
+#     return action, mdp, agent, policy_value
 
 
 @ex.capture
@@ -422,7 +423,7 @@ def act(state, agent, buffer, model, measure, mode, exploration_mode,
     perform_exploitation = (mode == 'exploit')
     if perform_active_exploration or perform_exploitation:
 
-        # to be fair to reactive methods, clear real env data in SAC buffer, to prevent further gradient updates from it.
+        # to be fair to reactive methods, clear real env data in SAC buffer
         # for active exploration, only effect of on-policy training remains
         if perform_active_exploration:
             #print ('resetting replay buffer -- on policy training')
@@ -445,173 +446,26 @@ def act(state, agent, buffer, model, measure, mode, exploration_mode,
         if use_best_policy:
             agent.load_state_dict(best_params)
 
-        if mode == 'explore' and len(ep_returns) >= 3:
-            first_return = ep_returns[0]
-            last_return = max(ep_returns) if use_best_policy else ep_returns[-1]
-            """
-            writer.add_scalar("policy_improvement_first_return", first_return / policy_horizon)
-            writer.add_scalar("policy_improvement_second_return", ep_returns[1] / policy_horizon)
-            writer.add_scalar("policy_improvement_last_return", last_return / policy_horizon)
-            writer.add_scalar("policy_improvement_max_return", max(ep_returns) / policy_horizon)
-            writer.add_scalar("policy_improvement_min_return", min(ep_returns) / policy_horizon)
-            writer.add_scalar("policy_improvement_median_return", np.median(ep_returns) / policy_horizon)
-            writer.add_scalar("policy_improvement_first_last_delta", (last_return - first_return) / policy_horizon)
-            writer.add_scalar("policy_improvement_second_last_delta", (last_return - ep_returns[1]) / policy_horizon)
-            writer.add_scalar("policy_improvement_median_last_delta", (last_return - np.median(ep_returns)) / policy_horizon)
-            """
+        # if mode == 'explore' and len(ep_returns) >= 3:
+        #     first_return = ep_returns[0]
+        #     last_return = max(ep_returns) if use_best_policy else ep_returns[-1]
+        #     """
+        #     writer.add_scalar("policy_improvement_first_return", first_return / policy_horizon)
+        #     writer.add_scalar("policy_improvement_second_return", ep_returns[1] / policy_horizon)
+        #     writer.add_scalar("policy_improvement_last_return", last_return / policy_horizon)
+        #     writer.add_scalar("policy_improvement_max_return", max(ep_returns) / policy_horizon)
+        #     writer.add_scalar("policy_improvement_min_return", min(ep_returns) / policy_horizon)
+        #     writer.add_scalar("policy_improvement_median_return", np.median(ep_returns) / policy_horizon)
+        #     writer.add_scalar("policy_improvement_first_last_delta", (last_return - first_return) / policy_horizon)
+        #     writer.add_scalar("policy_improvement_second_last_delta", (last_return - ep_returns[1]) / policy_horizon)
+        #     writer.add_scalar("policy_improvement_median_last_delta", (last_return - np.median(ep_returns)) / policy_horizon)
+        #     """
     return agent
 
 
 """
 Evaluation and Check-pointing
 """
-
-
-@ex.capture
-def transition_novelty(state, action, next_state, model, renyi_decay):
-    state = torch.from_numpy(state).float().unsqueeze(0).to(model.device)
-    action = torch.from_numpy(action).float().unsqueeze(0).to(model.device)
-    next_state = torch.from_numpy(next_state).float().unsqueeze(0).to(model.device)
-
-    with torch.no_grad():
-        mu, var = model.forward_all(state, action)
-    #measure = JensenRenyiDivergenceUtilityMeasure(decay=renyi_decay)
-    measure = SimpleVarianceUtility()
-    #measure = CompoundProbabilityStdevUtilityMeasure()
-    v = measure(state, action, next_state, mu, var, model)
-    return v.item()
-
-
-@ex.capture
-def evaluate_task(env, model, buffer, task, render, filename, record, save_eval_agents, verbosity, _run, _log):
-    env.seed(np.random.randint(2 ** 32 - 1))
-
-    video_filename = f'{filename}.mp4'
-    if record:
-        state = env.reset(filename=video_filename)
-    else:
-        state = env.reset()
-
-    ep_return = 0
-    agent = None
-    mdp = None
-    done = False
-    novelty = []
-    while not done:
-        action, mdp, agent, _ = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=task.measure, mode='exploit')
-        next_state, _, done, info = env.step(action)
-
-        n = transition_novelty(state, action, next_state, model=model)
-        novelty.append(n)
-
-        reward = task.reward_function(state, action, next_state)
-        if verbosity >= 3:
-            _log.info(f'reward: {reward:5.2f} trans_novelty: {n:5.2f} action: {action}')
-        ep_return += reward
-
-        if render:
-            env.render()
-
-        state = next_state
-
-    env.close()
-
-    if record:
-        _run.add_artifact(video_filename)
-
-    if save_eval_agents:
-        agent_filename = f'{filename}_agent.pt'
-        torch.save(agent.state_dict(), agent_filename)
-        _run.add_artifact(agent_filename)
-
-    return ep_return, np.mean(novelty)
-
-
-@ex.capture
-def evaluate_tasks(buffer, step_num, n_eval_episodes, evaluation_model_epochs, render, ant_coverage, rotation_coverage, dump_dir, _log, _run):
-    # Uncomment for exploration coverage in ant
-    if ant_coverage:
-        from envs.ant import rate_buffer
-        coverage = rate_buffer(buffer=buffer)
-        writer.add_scalar("coverage", coverage, step_num)
-        _run.result = coverage
-        _log.info(f"coverage: {coverage}")
-        return coverage
-
-    if rotation_coverage:
-        from envs.handblock import rotation_buffer
-        coverage = rotation_buffer(buffer=buffer)
-        writer.add_scalar("coverage", coverage, step_num)
-        _run.result = coverage
-        _log.info(f"coverage: {coverage}")
-        return coverage
-
-    model = fit_model(buffer=buffer, n_epochs=evaluation_model_epochs, step_num=step_num, mode='exploit')
-    env = get_env()
-
-    average_returns = []
-    for task_name, task in env.unwrapped.tasks.items():
-        task_returns = []
-        task_novelty = []
-        for ep_idx in range(1, n_eval_episodes + 1):
-            filename = f"{dump_dir}/evaluation_{step_num}_{task_name}_{ep_idx}"
-            ep_return, ep_novelty = evaluate_task(env=env, model=model, buffer=buffer, task=task, render=render, filename=filename)
-
-            _log.info(f"task: {task_name}\tepisode: {ep_idx}\treward: {np.round(ep_return, 4)}")
-            task_returns.append(ep_return)
-            task_novelty.append(ep_novelty)
-
-        average_returns.append(task_returns)
-        _log.info(f"task: {task_name}\taverage return: {np.round(np.mean(task_returns), 4)}")
-        writer.add_scalar(f"task_{task_name}_return", np.mean(task_returns), step_num)
-        writer.add_scalar(f"task_{task_name}_episode_novelty", np.mean(task_novelty), step_num)
-
-    average_return = np.mean(average_returns)
-    writer.add_scalar("average_return", average_return, step_num)
-    _run.result = average_return
-    return average_return
-
-
-@ex.capture
-def evaluate_utility(buffer, exploring_model_epochs, model_train_freq, n_eval_episodes, _log, _run):
-    env = get_env()
-    env.seed(np.random.randint(2 ** 32 - 1))
-
-    measure = get_utility_measure(utility_measure='var', utility_action_norm_penalty=0)
-
-    achieved_utilities = []
-    for ep_idx in range(1, n_eval_episodes + 1):
-        state = env.reset()
-        ep_utility = 0
-        ep_length = 0
-
-        model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=0, mode='explore')
-        agent = None
-        mdp = None
-        done = False
-
-        while not done:
-            action, mdp, agent, _ = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=measure, mode='explore')
-            next_state, _, done, info = env.step(action)
-            ep_length += 1
-            ep_utility += transition_novelty(state, action, next_state, model=model)
-            state = next_state
-
-            if ep_length % model_train_freq == 0:
-                model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=ep_length, mode='explore')
-                mdp = None
-                agent = None
-
-        achieved_utilities.append(ep_utility)
-        _log.info(f"{ep_idx}\tplanning utility: {ep_utility}")
-
-    env.close()
-
-    _run.result = np.mean(achieved_utilities)
-    _log.info(f"average planning utility: {np.mean(achieved_utilities)}")
-
-    return np.mean(achieved_utilities)
-
 
 @ex.capture
 def checkpoint(buffer, step_num, dump_dir, _run):
@@ -644,11 +498,13 @@ def evaluate_agent(agent, step_num, n_eval_episodes):
 Main Functions
 """
 
-
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps,  
-                       agent_train_freq, policy_batch_size, agent_batch_size, device,
-                       exploring_model_epochs, agent_active_updates, eval_freq, checkpoint_frequency, 
+                       agent_train_freq, model_train_freq,
+                       n_explore_rollout_steps, explore_rollout_freq,
+                       agent_active_updates, explore_agent_updates,
+                       policy_batch_size, agent_batch_size, device,
+                       exploring_model_epochs, eval_freq, checkpoint_frequency, 
                        render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
@@ -656,9 +512,14 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     env.seed(seed)
     atexit.register(lambda: env.close())
 
+    buffer = get_buffer()
     exploration_measure = get_utility_measure()
 
-    agent = get_policy(buffer=None, model=None, env=env, measure=None, 
+    if _config['normalize_data']:
+        normalizer = TransitionNormalizer()
+        buffer.setup_normalizer(normalizer)
+
+    agent = get_policy(buffer=None, model=None, measure=None, 
                        policy_batch_size=agent_batch_size, 
                        mode='explore', buffer_reuse=False)
 
@@ -668,19 +529,28 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     else:
         state = env.reset()
 
+    explore_rollout_step_num = n_explore_rollout_steps
     for step_num in range(1, n_exploration_steps + 1):
         # real env rollout
         if step_num > n_warm_up_steps:
-            with torch.no_grad():
-                action = agent(state)
-            # if action_noise_stdev:
-            #     action = action + action_noise_stdev * torch.randn(action.shape)
+            if step_num % explore_rollout_freq == 0:
+                explore_rollout_step_num = 0
+            if explore_rollout_step_num < n_explore_rollout_steps:
+                with torch.no_grad():
+                    action = explore_agent(state)
+                explore_rollout_step_num += 1
+                if action_noise_stdev:
+                    action = action + action_noise_stdev * torch.randn(action.shape)
+            else:
+                with torch.no_grad():
+                    action = agent(state)
         else:
             action = env.action_space.sample()
             action = torch.from_numpy(action).float().to(device)
             action = action.unsqueeze(0)
 
         next_state, reward, done, _ = env.step(action)
+        buffer.add(state, action, next_state)
         agent.replay.add(state, action, reward, next_state)
 
         if render:
@@ -702,11 +572,27 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         if step_num < n_warm_up_steps:
             continue
 
+        just_finished_warm_up = (step_num == n_warm_up_steps)
         # train task policy
-        if step_num % agent_train_freq == 0 or step_num == n_warm_up_steps:
+        if step_num % agent_train_freq == 0 or just_finished_warm_up:
             # _log.info(f"step: {step_num},\ttask_policy training")
             for _ in range(agent_active_updates):
                 agent.update()
+
+        # train dynaimc model and exploration policy
+        if step_num % model_train_freq == 0 or just_finished_warm_up:
+            _log.info(f"step: {step_num}, \tdynamic_model training")
+            model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num, mode='explore')
+            _log.info(f"step: {step_num}, \texplore_policy training")
+            explore_agent = deepcopy(agent)
+            explore_agent.set_batch_size(policy_batch_size)
+            explore_agent.set_alpha(alpha=0.1)
+            explore_agent = transfer_buffer_to_agent(buffer=buffer,
+                                                     agent=explore_agent,
+                                                     model=model,
+                                                     measure=exploration_measure)
+            for _ in range(explore_agent_updates):
+                explore_agent.update()
 
         # evaluate taks policy
         if (step_num % eval_freq) == 0 and step_num > n_warm_up_steps:
