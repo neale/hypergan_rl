@@ -57,7 +57,7 @@ def env_config():
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
-    n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 0                          # number of steps to populate the initial buffer, actions selected randomly
     n_exploration_steps = 1000000                    # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
@@ -138,6 +138,7 @@ def policy_config():
     policy_lr = 3e-4                                # SAC learning rate
     policy_gamma = 0.99                             # discount factor for SAC
     policy_tau = 0.005                              # soft target network update mixing factor
+    sac_automatic_entropy_tuning = False
 
     buffer_reuse = True                             # transfer the main exploration buffer as off-policy samples to SAC
     use_best_policy = False                         # execute the best policy or the last one
@@ -327,10 +328,11 @@ Planning
 
 
 @ex.capture
-def get_policy(buffer, model, measure, mode, d_state, d_action, 
+def get_policy(buffer, model, env, measure, mode, d_state, d_action, 
                policy_replay_size, policy_batch_size, policy_active_updates,
                policy_n_hidden, policy_lr, policy_gamma, policy_tau, 
                policy_explore_alpha, policy_exploit_alpha, policy_reward_scale,
+               sac_automatic_entropy_tuning,
                buffer_reuse, device, verbosity, _log):
 
     if verbosity:
@@ -340,7 +342,9 @@ def get_policy(buffer, model, measure, mode, d_state, d_action,
 
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
                 n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
-                reward_scale=policy_reward_scale, lr=policy_lr, tau=policy_tau)
+                reward_scale=policy_reward_scale, lr=policy_lr, tau=policy_tau, 
+                action_space_shape=env.action_space.shape,
+                automatic_entropy_tuning=sac_automatic_entropy_tuning)
 
     agent = agent.to(device)
     # if model is not None:
@@ -654,7 +658,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
 
     exploration_measure = get_utility_measure()
 
-    agent = get_policy(buffer=None, model=None, measure=None, 
+    agent = get_policy(buffer=None, model=None, env=env, measure=None, 
                        policy_batch_size=agent_batch_size, 
                        mode='explore', buffer_reuse=False)
 

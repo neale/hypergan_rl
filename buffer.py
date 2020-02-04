@@ -46,10 +46,10 @@ class Buffer:
             next_state: numpy vector of (d_state,) shape
 
         """
-        state = copy_tensor(state)
-        action = copy_tensor(action)
-        reward = copy_tensor(reward)
-        next_state = copy_tensor(next_state)
+        # state = copy_tensor(state)
+        # action = copy_tensor(action)
+        # reward = copy_tensor(reward)
+        # next_state = copy_tensor(next_state)
 
         state_delta = next_state - state
 

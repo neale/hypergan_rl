@@ -87,7 +87,7 @@ class Replay:
         if masks is None:
             masks = torch.ones(n_samples, 1)
 
-        states, actions, rewards, next_states = copy_tensor(states), copy_tensor(actions), copy_tensor(rewards), copy_tensor(next_states)
+        # states, actions, rewards, next_states = copy_tensor(states), copy_tensor(actions), copy_tensor(rewards), copy_tensor(next_states)
         rewards = rewards.unsqueeze(1)
         
         # skip ones with NaNs and Infs
@@ -328,8 +328,10 @@ class TanhGaussianPolicy(nn.Module):
 class SAC(nn.Module):
     def __init__(self, d_state, d_action, 
                  replay_size, batch_size, 
+                 action_space_shape,
                  n_updates, n_hidden, 
-                 gamma, alpha, reward_scale, lr, tau):
+                 gamma, alpha, reward_scale, lr, tau,
+                 automatic_entropy_tuning=False):
         super().__init__()
         self.d_state = d_state
         self.d_action = d_action
@@ -357,6 +359,13 @@ class SAC(nn.Module):
 
         self.grad_clip = 5
         self.normalizer = None
+
+        self.automatic_entropy_tuning = automatic_entropy_tuning
+        if self.automatic_entropy_tuning:
+            self.target_entropy = -np.prod(action_space_shape).item()
+            self.log_alpha = torch.zeros(1, requires_grad=True)
+            self.alpha_optim = Adam([self.log_alpha], lr=lr)
+            self.reward_scale = 1.
 
     @property
     def device(self):
@@ -394,6 +403,16 @@ class SAC(nn.Module):
         q1_pi, q2_pi = self.qf(states, pi) # 152, 153
         v_pred = self.vf(states) # 117
 
+        # alpha loss
+        if self.automatic_entropy_tuning:
+            alpha_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
+            self.alpha_optim.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optim.step()
+            alpha = self.log_alpha.exp()
+        else:
+            alpha = self.alpha
+
         # target value network
         v_target = self.vf_target(next_states) # 143
 
@@ -402,10 +421,10 @@ class SAC(nn.Module):
 
         # targets for Q and V regression
         q_target = self.reward_scale * rewards + self.gamma * masks * v_target # 144 masks ?= (1-terminals)
-        v_backup = min_q_pi - self.alpha * logp_pi # 155
+        v_backup = min_q_pi - alpha * logp_pi # 155
 
         # policy losses
-        pi_loss = torch.mean(self.alpha * logp_pi - min_q_pi) # 179
+        pi_loss = torch.mean(alpha * logp_pi - min_q_pi) # 179
         pi_loss += 0.001 * mu.pow(2).mean()
         pi_loss += 0.001 * log_std.pow(2).mean()
         # pre_activation_weight=0 so disregard that

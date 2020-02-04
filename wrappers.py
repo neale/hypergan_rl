@@ -32,9 +32,10 @@ class BoundedActionsEnv(gym.ActionWrapper):
         self.action_space = gym.spaces.Box(low=-1, high=1, shape=self.unwrapped.action_space.shape)
 
     def step(self, action):
-        action = np.clip(action, -1., 1.)
+        # action = np.clip(action, -1., 1.)
         lb, ub = self.unwrapped.action_space.low, self.unwrapped.action_space.high
         scaled_action = lb + (action + 1.0) * 0.5 * (ub - lb)
+        scaled_action = np.clip(scaled_action, lb, ub)
         observation, reward, done, info = self.env.step(scaled_action)
         return observation, reward, done, info
 
