@@ -7,7 +7,7 @@ def swish(x):
     return x * torch.sigmoid(x)
 
 nh = 16
-ni = 16
+ni = 32
 no = 512
 
 class GeneratorW1(nn.Module):
