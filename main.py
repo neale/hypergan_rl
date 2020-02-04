@@ -53,7 +53,7 @@ def config():
 @ex.config
 def env_config():
     env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
-    env_exploit_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    env_exploit_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
@@ -61,12 +61,11 @@ def env_config():
     n_exploration_steps = 300#00                     # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
-    eval_freq = 200000                                # interval in steps for evaluating models on tasks in the environment
+    eval_freq = 500                                # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
 
     # misc.
     env = gym.make(env_name)
-    env_exploit = gym.make(env_exploit_name)
     d_state = env.observation_space.shape[0]        # dimensionality of state
     d_action = env.action_space.shape[0]            # dimensionality of action
     del env
@@ -206,7 +205,8 @@ def exploit():
 Initialization Helpers
 """
 
-
+""" Either returns the env or the exploit env,
+Mixing Envs is hard since Magellan has two more states than HalfCheetah """
 @ex.capture
 def get_env(env_name, env_exploit_name, record, env_noise_stdev, mode='explore'):
     if mode == 'explore':
@@ -387,17 +387,14 @@ def get_policy_exploit(agent, buffer, model, measure, mode, d_state, d_action,
     if verbosity:
         _log.info("... getting fresh agent")
 
-    policy_alpha = policy_explore_alpha if mode == 'explore' else policy_exploit_alpha
-
+    policy_alpha = policy_explore_alpha_exploit
+    """ transfers buffer to agent, ??? """
     agent = SAC_EX(d_state=d_state, d_action=d_action, replay_size=policy_replay_size,
-                batch_size=agent_batch_size, n_updates=policy_active_updates,
-                n_hidden=policy_n_hidden, gamma=policy_gamma_exploit,
-                alpha=policy_alpha_exploit, lr=policy_lr_exploit,
-                tau=policy_tau_exploit, replay=agent.replay,
-                reward_scale=policy_reward_scale)
+                n_updates=policy_active_updates,
+                n_hidden=policy_n_hidden, replay_buffer=agent.buffer)
 
     agent = agent.to(device)
-    agent.setup_normalizer(model.normalizer)
+    #agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
         return agent
@@ -446,10 +443,12 @@ def evaluate_agent(agent, step_num, n_eval_episodes):
         ep_returns.append(ep_return)
     return np.mean(ep_returns)
 
-
+""" Changed to allow the call to evaluate agent once every 500 episodes, also prints training results """
 @ex.capture
-def train(env, agent, n_train_steps, verbosity, env_horizon, step_num, _run, _log): 
-    agent.reset_replay()
+def train(env, agent, eval_freq, n_train_steps, verbosity, env_horizon, step_num, _run, _log): 
+
+    # env = get_env(mode='exploit')
+    # agent.reset_replay()
     ep_returns = []
     n_episodes = int(n_train_steps / env_horizon)
     train_step_num = 0
@@ -457,8 +456,8 @@ def train(env, agent, n_train_steps, verbosity, env_horizon, step_num, _run, _lo
         ep_return = agent.episode(env=TorchEnv(env), verbosity=verbosity, _log=_log)
         ep_returns.append(ep_return)
         train_step_num += env_horizon
-        step_return = ep_return / env_horizon
-        _log.info(f"\tep: {ep_i}\taverage step return: {np.round(step_return, 3)}")
+        step_return = ep_return
+        _log.info(f"\tep: {ep_i}\taverage return: {np.round(step_return, 3)}")
         writer.add_scalar(f"train_return", step_return, train_step_num)
         
         if step_num % eval_freq == 0:
@@ -741,9 +740,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     buffer = get_buffer()
     exploration_measure = get_utility_measure()
 
-    if _config['normalize_data']:
-        normalizer = TransitionNormalizer()
-        buffer.setup_normalizer(normalizer)
+    # if _config['normalize_data']:
+        #normalizer = TransitionNormalizer()
+        #buffer.setup_normalizer(normalizer)
 
     model = None
     mdp = None
@@ -760,6 +759,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         policy_values = []
         action_norms = []
         if step_num > n_warm_up_steps:
+            env = get_env(mode='exploit')
+
+
             action, mdp, agent, policy_value = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=exploration_measure, mode='explore')
 
             writer.add_scalar("action_norm", np.sum(np.square(action)), step_num)
@@ -816,12 +818,13 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     _log.info(f"intrinsic training finished")
     if agent is None:
         agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
-    _log.info(f"starting extrinsic training")
-    agent = get_policy_exploit(agent=agent, buffer=buffer, model=model,
-                       measure=exploration_measure, mode='explore')
 
+    """ transfer to external reward, new env and old agent """
+    _log.info(f"starting extrinsic training")
     env = get_env(mode='exploit')
-    env = TorchEnv(env)
+    # should the buffer be reused to not... 
+    agent = get_policy_exploit(agent=agent, buffer=buffer, model=model,
+                       measure=exploration_measure, mode='explore', buffer_reuse=False)
     max_return = train(env=env, agent=agent, step_num=step_num) 
 
     if record:
