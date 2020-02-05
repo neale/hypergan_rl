@@ -326,11 +326,11 @@ class TanhGaussianPolicy(nn.Module):
 
 
 class SAC(nn.Module):
-    def __init__(self, d_state, d_action, 
-                 replay_size, batch_size, 
+    def __init__(self, d_state, d_action, replay_size, 
+                 n_hidden, n_updates,
+                 gamma, tau, reward_scale,
+                 batch_size, alpha, lr,
                  action_space_shape,
-                 n_updates, n_hidden, 
-                 gamma, alpha, reward_scale, lr, tau,
                  automatic_entropy_tuning=False):
         super().__init__()
         self.d_state = d_state
@@ -373,6 +373,16 @@ class SAC(nn.Module):
 
     def set_batch_size(self, batch_size):
         self.batch_size = batch_size
+
+    def set_lr(self, lr):
+        self.qf_optim = Adam(self.qf.parameters(), lr=lr)
+        self.vf_optim = Adam(self.vf.parameters(), lr=lr)
+        self.policy_optim = Adam(self.policy.parameters(), lr=lr)
+        if self.automatic_entropy_tuning:
+            self.alpha_optim = Adam([self.log_alpha], lr=lr)
+
+    def set_alpha(self, alpha):
+        self.alpha = alpha
 
     def setup_normalizer(self, normalizer):
         self.normalizer = normalizer
@@ -470,7 +480,7 @@ class SAC(nn.Module):
         while not done:
             if warm_up:
                 actions = env.action_space.sample()
-                actions = torch.from_numpy(actions)
+                actions = torch.from_numpy(actions).float().to(self.device)
             else:
                 with torch.no_grad():
                     actions = self(states)
