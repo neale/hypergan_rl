@@ -89,6 +89,8 @@ def env_config():
     data_buffer_size = int(1e+6) + 1      # size of the data buffer (FIFO queue)
     action_noise_stdev = 0                          # noise added to actions
 
+    buffer_load_file = None                         # exact path to load a buffer (checkpoint)
+
     # misc.
     env = gym.make(env_name)
     d_state = env.observation_space.shape[0]        # dimensionality of state
@@ -445,13 +447,22 @@ def checkpoint(buffer, step_num, dump_dir, _run):
     _run.add_artifact(buffer_file)
 
 
+@ex.capture
+def load_checkpoint(buffer_load_file, _run):
+    print ("loading from checkpoint: ", buffer_load_file)
+    with gzip.open(buffer_load_file, 'rb') as f:
+        buffer = pickle.load(f, encoding='latin1')  # load from buffer file
+    step_num = int(buffer_load_file.split('.')[0].split('/', 10)[-1])
+    return buffer, step_num
+
+
 """
 Main Functions
 """
 
 
 @ex.capture
-def do_max_exploration(seed, action_noise_stdev,  
+def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
                        n_exploration_steps, n_task_steps, n_warm_up_steps, 
                        model_train_freq, exploring_model_epochs, policy_eval_freq,
                        policy_task_train_freq, policy_task_active_updates, 
@@ -471,12 +482,18 @@ def do_max_exploration(seed, action_noise_stdev,
         buffer.setup_normalizer(normalizer)
 
     model = None
+
+    step_num = 1
+    if buffer_load_file is not None:
+        buffer, step_num = load_checkpoint()
+        model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num)
+
     mdp = None
     agent = None
 
     """ intrinsic training stage """
     state = env.reset()
-    for explore_step_num in range(1, n_exploration_steps + 1):
+    for explore_step_num in range(step_num, n_exploration_steps + 1):
         # policy_values = []
         # action_norms = []
         if explore_step_num > n_warm_up_steps:
