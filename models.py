@@ -1,30 +1,115 @@
-import sys
 import numpy as np
-import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.autograd as autograd
-import ensemble
 
 from torch.distributions import Normal
-from kernels import *
+
 from normalizer import TransitionNormalizer
 
-i=0
-j=0
+
+def swish(x):
+    return x * torch.sigmoid(x)
+
+
+class EnsembleDenseLayer(nn.Module):
+    def __init__(self, n_in, n_out, ensemble_size, non_linearity='leaky_relu'):
+        """
+        linear + activation Layer
+        there are `ensemble_size` layers
+        computation is done using batch matrix multiplication
+        hence forward pass through all models in the ensemble can be done in one call
+
+        weights initialized with xavier normal for leaky relu and linear, xavier uniform for swish
+        biases are always initialized to zeros
+
+        Args:
+            n_in: size of input vector
+            n_out: size of output vector
+            ensemble_size: number of models in the ensemble
+            non_linearity: 'linear', 'swish' or 'leaky_relu'
+        """
+
+        super().__init__()
+
+        weights = torch.zeros(ensemble_size, n_in, n_out).float()
+        biases = torch.zeros(ensemble_size, 1, n_out).float()
+
+        for weight in weights:
+            if non_linearity == 'swish':
+                nn.init.xavier_uniform_(weight)
+            elif non_linearity == 'leaky_relu':
+                nn.init.kaiming_normal_(weight)
+            elif non_linearity == 'tanh':
+                nn.init.kaiming_normal_(weight)
+            elif non_linearity == 'linear':
+                nn.init.xavier_normal_(weight)
+
+        self.weights = nn.Parameter(weights)
+        self.biases = nn.Parameter(biases)
+
+        if non_linearity == 'swish':
+            self.non_linearity = swish
+        elif non_linearity == 'leaky_relu':
+            self.non_linearity = F.leaky_relu
+        elif non_linearity == 'tanh':
+            self.non_linearity = torch.tanh
+        elif non_linearity == 'linear':
+            self.non_linearity = lambda x: x
+
+    def forward(self, inp):
+        op = torch.baddbmm(self.biases, inp, self.weights)
+        return self.non_linearity(op)
+
 
 class Model(nn.Module):
     min_log_var = -5
     max_log_var = -1
 
-    def __init__(self, d_action, d_state, n_hidden, n_layers, ensemble_size, non_linearity='leaky_relu', device=torch.device('cuda')):
+    def __init__(self, d_action, d_state, n_hidden, n_layers, ensemble_size, non_linearity='leaky_relu', device=torch.device('cpu')):
+        """
+        state space forward model.
+        predicts mean and variance of next state given state and action i.e independent gaussians for each dimension of next state.
+
+        using state and  action, delta of state is computed.
+        the mean of the delta is added to current state to get the mean of next state.
+
+        there is a soft threshold on the output variance, forcing it to be in the same range as the variance of the training data.
+        the thresholds are learnt in the form of bounds on variance and a small penalty is used to contract the distance between the lower and upper bounds.
+
+        loss components:
+            1. minimize negative log-likelihood of data
+            2. (small weight) try to contract lower and upper bounds of variance
+
+        Args:
+            d_action (int): dimensionality of action
+            d_state (int): dimensionality of state
+            n_hidden (int): size or width of hidden layers
+            n_layers (int): number of hidden layers (number of non-lineatities). should be >= 2
+            ensemble_size (int): number of models in the ensemble
+            non_linearity (str): 'linear', 'swish' or 'leaky_relu'
+            device (str): device of the model
+        """
+
+        assert n_layers >= 2, "minimum depth of model is 2"
 
         super().__init__()
 
-        self.hypergan = ensemble.HyperGAN(device, d_action, d_state)
-        # match_hypergan(self.hypergan, ensemble_size, d_action, d_state, n_hidden, device)
+        layers = []
+        for lyr_idx in range(n_layers + 1):
+            if lyr_idx == 0:
+                lyr = EnsembleDenseLayer(d_action + d_state, n_hidden, ensemble_size, non_linearity=non_linearity)
+            elif 0 < lyr_idx < n_layers:
+                lyr = EnsembleDenseLayer(n_hidden, n_hidden, ensemble_size, non_linearity=non_linearity)
+            elif lyr_idx == n_layers:
+                lyr = EnsembleDenseLayer(n_hidden, d_state + d_state, ensemble_size, non_linearity='linear')
+            layers.append(lyr)
+
+        self.layers = nn.Sequential(*layers)
+
+        self.to(device)
+
         self.normalizer = None
 
         self.d_action = d_action
@@ -33,24 +118,7 @@ class Model(nn.Module):
         self.n_layers = n_layers
         self.ensemble_size = ensemble_size
         self.device = device
-        
-        self.normal = torch.distributions.Normal(loc=torch.zeros(32), scale=torch.ones(32))
-        self.uniform = torch.distributions.Uniform(low=torch.zeros(32), high=torch.ones(32))
-        probs = torch.ones(32)/float(32)
-        self.categorical = torch.distributions.OneHotCategorical(probs=probs)
-    
-        self._fetch_ensemble()  
-        self.to(device)
 
-    
-    def _fetch_ensemble(self, resample=True):
-        #codes = torch.rand(5, self.ensemble_size, 64).to(self.device)
-        if resample:
-            #print ('resampling models')
-            self.codes = self.normal.sample([self.ensemble_size])
-            self.codes = self.codes.unsqueeze(0).repeat(5, 1, 1).to(self.device)
-        self.ensemble = self.hypergan.generator(self.codes)
-        
     def setup_normalizer(self, normalizer):
         self.normalizer = TransitionNormalizer()
         self.normalizer.set_state(normalizer.get_state())
@@ -81,29 +149,18 @@ class Model(nn.Module):
             delta_mean = self.normalizer.denormalize_state_delta_means(delta_mean)
             var = self.normalizer.denormalize_state_delta_vars(var)
         return delta_mean, var
-    
-    def _propagate_network(self, states, actions, return_preds=None, for_loss=False, sample=True):
-        self._fetch_ensemble(resample=True)
-        inputs = torch.cat((states, actions), dim=-1)
-        means, stds, preds = [], [], [] 
-        preds = self.hypergan.eval_all(self.ensemble, inputs) ## (32, 256, 31)
-        delta_mean = preds.mean(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
-        var = preds.var(0).unsqueeze(0).repeat(self.ensemble_size, 1, 1)
-        if inputs.shape[1] == 1: # real env step
-            if for_loss is True:
-                return preds
-            else:
-                return preds, preds
 
-        if not return_preds:
-            if for_loss is True:
-                return preds
-            else:
-                #return delta_mean, var
-                return preds, preds
-        else:
-            return preds
-    
+    def _propagate_network(self, states, actions):
+        inp = torch.cat((states, actions), dim=2)
+        op = self.layers(inp)
+        delta_mean, log_var = torch.split(op, op.size(2) // 2, dim=2)
+
+        log_var = torch.sigmoid(log_var)      # in [0, 1]
+        log_var = self.min_log_var + (self.max_log_var - self.min_log_var) * log_var
+        var = torch.exp(log_var)              # normal scale, not log
+
+        return delta_mean, var
+
     def forward(self, states, actions):
         """
         predict next state mean and variance.
@@ -140,9 +197,7 @@ class Model(nn.Module):
         states = states.unsqueeze(0).repeat(self.ensemble_size, 1, 1)
         actions = actions.unsqueeze(0).repeat(self.ensemble_size, 1, 1)
         next_state_means, next_state_vars = self(states, actions)
-        next_state_means = next_state_means.transpose(0, 1)
-        next_state_vars = next_state_vars.transpose(0, 1)
-        return next_state_means, next_state_vars
+        return next_state_means.transpose(0, 1), next_state_vars.transpose(0, 1)
 
     def sample(self, mean, var):
         """
@@ -157,62 +212,6 @@ class Model(nn.Module):
         """
 
         return Normal(mean, torch.sqrt(var)).sample()
-    
-    """ Amortized Stein Variational Gradient Descent Ops (Layers) """
-    def svgd_batch_theta(self, means_zj, targets):
-        alpha = .1
-        svgd_sum, loss, kappa_sum = 0, 0, 0
-        
-        log_probs = F.mse_loss(means_zj, targets)  # calculate log probs
-        # log_probs.backward(retain_graph=True)
-        logp_z = autograd.grad(log_probs.sum(), means_zj)[0]  # [particles, batch, d_output]
-        layers = [] # put the ensemble into a sensible list of layers
-        for item in self.ensemble:
-            item = item.view(self.ensemble_size, -1)
-            layers.append(item)
-        layers = torch.cat(layers, dim=-1).view(self.ensemble_size, -1)  # [particles, params]
-
-        eps_svgd = torch.ones_like(layers).uniform_(-1e-7, 1e-7)  # protect against two identical inputs
-        
-        kappa = batch_rbf(layers + eps_svgd)  # [particles, particles]
-        grad_kappa = autograd.grad(kappa.sum(), layers)[0]  # [particles, params]
-        
-        logp_z = logp_z.transpose(0, 1).unsqueeze(2)  # [batch, particles, 1, d_output]
-        logp_z = logp_z.mean(0).mean(-1)  # [particles, 1]
-        kernel_logp = torch.matmul(kappa.detach(), logp_z)  # [particles, 1]
-
-        svgd = (kernel_logp + alpha * grad_kappa)# / self.ensemble_size  # [particles, params]
-        
-        svgd_val = svgd.mean().item()
-        kappa_val = kappa.mean().item()
-        log_probs_val = log_probs.mean()
-        return log_probs, layers, svgd
-    
-    """ not used yet, can't get the dimensions to work out, but shoudl push predictions apart (SVGD) """
-    def svgd_batch_values(self, means_zj, means_zi, targets):
-        alpha = 1e-3
-        means_zj = means_zj.transpose(0, 1)  # [batch, particles, state]
-        means_zi = means_zi.transpose(0, 1)  # [batch, particles, state]
-        targets = targets.transpose(0, 1)  # [batch, particles, state]
-
-        #means, means_frozen = torch.split(means_zj, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
-        #targets, targets_frozen = torch.split(targets, self.ensemble_size//2, dim=1)  # [batch, particles//2, state]
-        means_zi.detach()   
-        #targets_frozen.detach()
-        
-        log_probs = F.mse_loss(means_zj, targets, reduction='none')  # calculate log probs
-        logp_grad = autograd.grad(log_probs.sum(), inputs=means_zj)[0]  # [particles, batch, d_output]
-        logp_grad = logp_grad.unsqueeze(2)
-        kappa, grad_kappa = batch_rbf_xy(means_zi, means_zj)
-        kappa = kappa.unsqueeze(-1)
-        #print ('kappa', kappa.shape, kappa.mean().item())
-        ##print ('gk: ', grad_kappa.shape, grad_kappa.mean().item())
-        #print ('log_probs', log_probs.shape, log_probs.mean().item())
-        #print ('logp grads', logp_grad.shape, logp_grad.mean().item())
-        kernel_logp = torch.matmul(kappa.detach(), logp_grad)
-        svgd = (kernel_logp + alpha * grad_kappa).mean(1)
-        return log_probs, means_zj, svgd
-
 
     def loss(self, states, actions, state_deltas, training_noise_stdev=0):
         """
@@ -229,38 +228,22 @@ class Model(nn.Module):
         Returns:
             loss (torch 0-dim tensor): `.backward()` can be called on it to compute gradients
         """
-        svgd = True
-        theta = False
-        values = True
-        if svgd:
-            if theta:
-                svgd_batch_fn = self.svgd_batch_params
-            elif values:
-                svgd_batch_fn = self.svgd_batch_values
 
         states, actions = self._pre_process_model_inputs(states, actions)
         targets = self._pre_process_model_targets(state_deltas)
-        # self._fetch_ensemble()
+
         if not np.allclose(training_noise_stdev, 0):
             states += torch.randn_like(states) * training_noise_stdev
             actions += torch.randn_like(actions) * training_noise_stdev
             targets += torch.randn_like(targets) * training_noise_stdev
-        
-        if not svgd:
-            # negative log likelihood
-            means = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
-            loss = F.mse_loss(means, targets)
-            ret = (loss, None, None)
-        
-        else:
-            means_zi = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
-            # try resampling
-            means_zj = self._propagate_network(states, actions, return_preds=False, for_loss=True)      # delta and variance
-            loss, particle_values, svgd = svgd_batch_fn(means_zj, means_zi, targets)
-            ret = (loss, particle_values, svgd)
-        
-        return ret
 
+        mu, var = self._propagate_network(states, actions)      # delta and variance
+
+        # negative log likelihood
+        loss = (mu - targets) ** 2 / var + torch.log(var)
+        loss = torch.mean(loss)
+
+        return loss
 
     def likelihood(self, states, actions, next_states):
         """

@@ -112,11 +112,11 @@ def model_training_config():
     exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
-    learning_rate = 1e-4                            # learning rate for training models
+    learning_rate = 1e-3                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
-    weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
+    weight_decay = 0                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
-    grad_clip = 4                                   # gradient clipping to train model
+    grad_clip = 5                                   # gradient clipping to train model
 
 
 # noinspection PyUnusedLocal
@@ -158,10 +158,10 @@ def policy_config():
 # noinspection PyUnusedLocal
 @ex.config
 def measure_config():
-    # utility_measure = 'renyi_div'                 # measure for calculating exploration utility of a particular (state, action)
+    utility_measure = 'renyi_div'                 # measure for calculating exploration utility of a particular (state, action)
     # utility_measure = 'traj_stdev'
     # utility_measure = 'cp_stdev'
-    utility_measure =  'var'               
+    # utility_measure =  'var'               
     renyi_decay = 0.1                               # decay to be used in calculating Renyi entropy
     utility_action_norm_penalty = 0                 # regularize to actions even when exploring
 
@@ -250,46 +250,24 @@ Model Training
 """
 
 @ex.capture
-def train_epoch(model, buffer, optimizer, n_layers, batch_size, training_noise_stdev, grad_clip):
+def train_epoch(model, buffer, optimizer, batch_size, training_noise_stdev, grad_clip):
     losses = []
     for tr_states, tr_actions, tr_state_deltas in buffer.train_batches(batch_size=batch_size):
- 
-        gen_loss = model.loss(tr_states, tr_actions, tr_state_deltas, training_noise_stdev=training_noise_stdev)
-        
-        for i, m in enumerate(optimizer):
-            m.zero_grad()
-        
-        if gen_loss[1] is not None:
-            loss, particle_values, svgd = gen_loss
-            autograd.backward(particle_values, grad_tensors=svgd.detach())
-            loss = loss.mean()
-        else:
-            loss = gen_loss[0]
-            loss.backward()
-
+        optimizer.zero_grad()
+        loss = model.loss(tr_states, tr_actions, tr_state_deltas, training_noise_stdev=training_noise_stdev)
         losses.append(loss.item())
-        
-        torch.nn.utils.clip_grad_value_(model.hypergan.generator.W1.parameters(), grad_clip)
-        torch.nn.utils.clip_grad_value_(model.hypergan.generator.W2.parameters(), grad_clip)
-        torch.nn.utils.clip_grad_value_(model.hypergan.generator.W3.parameters(), grad_clip)
-        torch.nn.utils.clip_grad_value_(model.hypergan.generator.W4.parameters(), grad_clip)
-        torch.nn.utils.clip_grad_value_(model.hypergan.generator.W5.parameters(), grad_clip)
+        loss.backward()
+        torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+        optimizer.step()
 
-        for i, m in enumerate(optimizer):
-            m.step()
     return np.mean(losses)
 
 
 @ex.capture
-def fit_model(buffer, n_layers, n_epochs, step_num, verbosity, _log, _run):
+def fit_model(buffer, n_epochs, step_num, verbosity, _log, _run):
     model = get_model()
     model.setup_normalizer(buffer.normalizer)
-    
-    optimizer = [get_optimizer_factory()(model.hypergan.generator.W1.parameters()),
-                  get_optimizer_factory()(model.hypergan.generator.W2.parameters()),
-                  get_optimizer_factory()(model.hypergan.generator.W3.parameters()),
-                  get_optimizer_factory()(model.hypergan.generator.W4.parameters()),
-                  get_optimizer_factory()(model.hypergan.generator.W5.parameters())]
+    optimizer = get_optimizer_factory()(model.parameters())
 
     if verbosity:
         _log.info(f"step: {step_num}\t training")
@@ -300,7 +278,8 @@ def fit_model(buffer, n_layers, n_epochs, step_num, verbosity, _log, _run):
             _log.info(f'epoch: {epoch_i:3d} training_loss: {tr_loss:.2f}')
 
     _log.info(f"step: {step_num}\t training done for {n_epochs} epochs, final loss: {np.round(tr_loss, 3)}")
-    writer.add_scalar("explore_loss", tr_loss, step_num)
+
+    _run.log_scalar("explore_loss", tr_loss, step_num)
 
     return model
 
