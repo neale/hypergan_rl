@@ -33,7 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/cheetah/run_v1'
+log_dir = 'runs/cheetah/run_v2'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -137,7 +137,7 @@ def policy_config():
     policy_task_batch_size = 256
     policy_task_lr = 3e-4
     policy_task_alpha = 1.0
-    buffer_reuse_task = False                             # transfer the main exploration buffer as off-policy samples to SAC
+    buffer_reuse_task = True                             # transfer the main exploration buffer as off-policy samples to SAC
 
     policy_task_active_updates = 1
     policy_task_train_freq = 1
@@ -337,7 +337,7 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, ver
     agent = agent.to(device)
     # agent.setup_normalizer(model.normalizer)
 
-    if not buffer_reuse_explore:
+    if not (buffer_reuse_explore and mode == 'explore'):
         return agent
 
     if verbosity:
@@ -519,17 +519,12 @@ def do_max_exploration(seed, action_noise_stdev,
             checkpoint(buffer=buffer, step_num=explore_step_num)
 
     _log.info(f"intrinsic training finished")
-    if agent is None:
-        _, mdp, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=exploration_measure)
 
 
     """ extrinsic training stage """
-    agent.set_batch_size(policy_task_batch_size)
-    agent.set_lr(policy_task_lr)
-    agent.set_alpha(policy_task_alpha)
-    agent.reset_replay()
-    if buffer_reuse_task:
-        agent = transfer_buffer_to_agent(buffer, agent)
+    agent = None
+    agent = get_policy(buffer=buffer, model=model, env=env, measure=exploration_measure, mode='task')
+    agent = transfer_buffer_to_agent(buffer, agent)
 
     _log.info(f"starting extrinsic training")
     for task_step_num in range(1, n_task_steps + 1):
