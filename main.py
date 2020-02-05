@@ -83,8 +83,8 @@ def env_config():
     env_exploit_name = 'MagellanHalfCheetah-v2'     # environment out of the defined magellan environments with `Magellan` prefix
     env_noise_stdev = 0                             # standard deviation of noise added to state
     n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
-    n_exploration_steps = 100000                     # total number of steps (including warm up) of exploration
-    n_task_steps = 900000
+    n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
+    n_task_steps = 990000
     env_horizon = 1000
     data_buffer_size = int(1e+6) + 1      # size of the data buffer (FIFO queue)
     action_noise_stdev = 0                          # noise added to actions
@@ -532,6 +532,7 @@ def do_max_exploration(seed, action_noise_stdev,
         agent = transfer_buffer_to_agent(buffer, agent)
 
     _log.info(f"starting extrinsic training")
+    ep_returns = []
     for task_step_num in range(1, n_task_steps + 1):
         with torch.no_grad():
             action = agent(state)
@@ -553,11 +554,9 @@ def do_max_exploration(seed, action_noise_stdev,
             avg_return = evaluate_agent(agent, task_step_num)
             _log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
             writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
+            ep_returns.append(avg_return)
 
-    if record:
-        _run.add_artifact(video_filename)
-
-    return max_return
+    return max(ep_returns)
     # return max(average_performances)
 
 
