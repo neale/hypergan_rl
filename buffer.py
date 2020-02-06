@@ -5,7 +5,7 @@ import torch
 import warnings
 
 def copy_tensor(x):
-    return x.clone().detach().cpu()
+    return x.clone().detach() #.cpu()
 
 class Buffer:
     def __init__(self, d_state, d_action, ensemble_size, buffer_size):
@@ -46,10 +46,10 @@ class Buffer:
             next_state: numpy vector of (d_state,) shape
 
         """
-        # state = copy_tensor(state)
-        # action = copy_tensor(action)
-        # reward = copy_tensor(reward)
-        # next_state = copy_tensor(next_state)
+        state = copy_tensor(state)
+        action = copy_tensor(action)
+        reward = copy_tensor(reward)
+        next_state = copy_tensor(next_state)
 
         state_delta = next_state - state
 

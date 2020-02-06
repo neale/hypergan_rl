@@ -24,7 +24,7 @@ from sac import SAC
 
 import gym
 import envs
-from wrappers import BoundedActionsEnv, RecordedEnv, NoisyEnv, TorchEnv
+from wrappers import NormalizedBoxEnv, BoundedActionsEnv, RecordedEnv, NoisyEnv, TorchEnv
 
 from sacred import Experiment
 
@@ -52,7 +52,7 @@ def config():
 # noinspection PyUnusedLocal
 @ex.config
 def env_config():
-    env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    env_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
     env_base = env_name
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
@@ -200,16 +200,10 @@ Initialization Helpers
 
 
 @ex.capture
-def get_env(env_name, record, env_noise_stdev):
+def get_env(env_name): #, record, env_noise_stdev):
     env = gym.make(env_name)
-    env = BoundedActionsEnv(env)
-
-    if env_noise_stdev:
-        env = NoisyEnv(env, stdev=env_noise_stdev)
-
-    if record:
-        env = RecordedEnv(env)
-
+    env = NormalizedBoxEnv(env)
+    env = TorchEnv(env)
     return env
 
 
@@ -624,7 +618,6 @@ def checkpoint(buffer, step_num, dump_dir, _run):
 @ex.capture
 def evaluate_agent(agent, step_num, n_eval_episodes):
     env = get_env()
-    env = TorchEnv(env)
     ep_returns = []
     for ep_idx in range(n_eval_episodes):
         ep_return = 0
@@ -652,7 +645,6 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
                        render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
-    env = TorchEnv(env)
     env.seed(seed)
     atexit.register(lambda: env.close())
 
@@ -668,6 +660,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     else:
         state = env.reset()
 
+    ep_returns = []
     for step_num in range(1, n_exploration_steps + 1):
         # real env rollout
         if step_num > n_warm_up_steps:
@@ -713,86 +706,9 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
             avg_return = evaluate_agent(agent, step_num)
             _log.info(f"step: {step_num}, evaluate:\taverage return = {np.round(avg_return, 4)}")
             writer.add_scalar(f"evaluate_return", avg_return, step_num)
+            ep_returns.append(avg_return)
 
-        # time_to_checkpoint = ((step_num % checkpoint_frequency) == 0)
-        # if time_to_checkpoint:
-        #     checkpoint(buffer=buffer, step_num=step_num)
-
-    if record:
-        _run.add_artifact(video_filename)
-
-    return avg_return
-    # return max_return
-    # return max(average_performances)
-
-
-@ex.capture
-def do_random_exploration(seed, normalize_data, n_exploration_steps, n_warm_up_steps, eval_freq, _log):
-    env = get_env()
-    env.seed(seed)
-    atexit.register(lambda: env.close())
-
-    buffer = get_buffer()
-    if normalize_data:
-        normalizer = TransitionNormalizer()
-        buffer.setup_normalizer(normalizer)
-
-    average_performances = []
-    state = env.reset()
-    for step_num in range(1, n_exploration_steps + 1):
-        action = env.action_space.sample()
-        next_state, reward, done, info = env.step(action)
-        buffer.add(state, action, next_state)
-
-        if done:
-            _log.info(f"step: {step_num}\tepisode complete")
-            next_state = env.reset()
-
-        state = next_state
-
-        time_to_evaluate = ((step_num % eval_freq) == 0)
-        just_finished_warm_up = (step_num == n_warm_up_steps)
-        if time_to_evaluate or just_finished_warm_up:
-            average_performance = evaluate_tasks(buffer=buffer, step_num=step_num)
-            average_performances.append(average_performance)
-
-    checkpoint(buffer=buffer, step_num=n_exploration_steps)
-
-    return max(average_performances)
-
-
-@ex.capture
-def do_exploitation(seed, normalize_data, n_exploration_steps, buffer_file, ensemble_size, benchmark_utility, _log, _run):
-    if len(buffer_file):
-        with gzip.open(buffer_file, 'rb') as f:
-            buffer = pickle.load(f)
-        buffer.ensemble_size = ensemble_size
-    else:
-        env = get_env()
-        env.seed(seed)
-        atexit.register(lambda: env.close())
-
-        buffer = get_buffer()
-        if normalize_data:
-            normalizer = TransitionNormalizer()
-            buffer.setup_normalizer(normalizer)
-
-        state = env.reset()
-        for step_num in range(1, n_exploration_steps + 1):
-            action = env.action_space.sample()
-            next_state, reward, done, info = env.step(action)
-            buffer.add(state, action, next_state)
-
-            if done:
-                _log.info(f"step: {step_num}\tepisode complete")
-                next_state = env.reset()
-
-            state = next_state
-
-    if benchmark_utility:
-        return evaluate_utility(buffer=buffer)
-    else:
-        return evaluate_tasks(buffer=buffer, step_num=0)
+    return max(ep_returns)
 
 
 @ex.automain
@@ -809,8 +725,4 @@ def main(max_exploration, random_exploration, exploitation, seed, omp_num_thread
 
     if max_exploration:
         return do_max_exploration()
-    elif random_exploration:
-        return do_random_exploration()
-    elif exploitation:
-        return do_exploitation()
 

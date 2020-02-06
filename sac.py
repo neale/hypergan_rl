@@ -14,7 +14,7 @@ LOG_STD_MAX = 2
 EPS = 1e-6
 
 def copy_tensor(x):
-    return x.clone().detach().cpu()
+    return x.clone().detach() #.cpu()
 
 
 def danger_mask(x):
@@ -87,7 +87,7 @@ class Replay:
         if masks is None:
             masks = torch.ones(n_samples, 1)
 
-        # states, actions, rewards, next_states = copy_tensor(states), copy_tensor(actions), copy_tensor(rewards), copy_tensor(next_states)
+        states, actions, rewards, next_states = copy_tensor(states), copy_tensor(actions), copy_tensor(rewards), copy_tensor(next_states)
         rewards = rewards.unsqueeze(1)
         
         # skip ones with NaNs and Infs
