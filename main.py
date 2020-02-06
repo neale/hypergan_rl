@@ -83,11 +83,13 @@ def env_config():
     env_exploit_name = 'MagellanHalfCheetah-v2'     # environment out of the defined magellan environments with `Magellan` prefix
     env_noise_stdev = 0                             # standard deviation of noise added to state
     n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
-    n_exploration_steps = 100000                     # total number of steps (including warm up) of exploration
-    n_task_steps = 900000
+    n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
+    n_task_steps = 990000
     env_horizon = 1000
     data_buffer_size = int(1e+6) + 1      # size of the data buffer (FIFO queue)
     action_noise_stdev = 0                          # noise added to actions
+
+    buffer_load_file = None                         # exact path to load a buffer (checkpoint)
 
     # misc.
     env = gym.make(env_name)
@@ -424,13 +426,22 @@ def checkpoint(buffer, step_num, dump_dir, _run):
     _run.add_artifact(buffer_file)
 
 
+@ex.capture
+def load_checkpoint(buffer_load_file, _run):
+    print ("loading from checkpoint: ", buffer_load_file)
+    with gzip.open(buffer_load_file, 'rb') as f:
+        buffer = pickle.load(f, encoding='latin1')  # load from buffer file
+    step_num = int(buffer_load_file.split('.')[0].split('/', 10)[-1])
+    return buffer, step_num
+
+
 """
 Main Functions
 """
 
 
 @ex.capture
-def do_max_exploration(seed, action_noise_stdev,  
+def do_max_exploration(seed, action_noise_stdev, buffer_load_file, 
                        n_exploration_steps, n_task_steps, n_warm_up_steps, 
                        model_train_freq, exploring_model_epochs, policy_eval_freq,
                        policy_task_train_freq, policy_task_active_updates, 
@@ -450,12 +461,18 @@ def do_max_exploration(seed, action_noise_stdev,
         buffer.setup_normalizer(normalizer)
 
     model = None
+
+    step_num = 1
+    if buffer_load_file is not None:
+        buffer, step_num = load_checkpoint()
+        model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num)
+
     mdp = None
     agent = None
 
     """ intrinsic training stage """
     state = env.reset()
-    for explore_step_num in range(1, n_exploration_steps + 1):
+    for explore_step_num in range(step_num, n_exploration_steps + 1):
         # policy_values = []
         # action_norms = []
         if explore_step_num > n_warm_up_steps:
@@ -511,6 +528,7 @@ def do_max_exploration(seed, action_noise_stdev,
         agent = transfer_buffer_to_agent(buffer, agent)
 
     _log.info(f"starting extrinsic training")
+    ep_returns = []
     for task_step_num in range(1, n_task_steps + 1):
         with torch.no_grad():
             action = agent(state)
@@ -532,11 +550,9 @@ def do_max_exploration(seed, action_noise_stdev,
             avg_return = evaluate_agent(agent, task_step_num)
             _log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
             writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
+            ep_returns.append(avg_return)
 
-    if record:
-        _run.add_artifact(video_filename)
-
-    return max_return
+    return max(ep_returns)
     # return max(average_performances)
 
 
