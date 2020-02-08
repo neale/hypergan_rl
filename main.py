@@ -21,6 +21,7 @@ from normalizer import TransitionNormalizer
 from imagination import Imagination
 
 from sac import SAC
+from sac_exploit import SAC as SAC_EX
 
 import gym
 import envs
@@ -34,7 +35,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/ant/svgd_preds_a1e-3_lr3e-4_16ih_means1'
+log_dir = 'runs/cheetah/run_sac'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -57,11 +58,12 @@ def env_config():
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
     n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
-    n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
+    n_exploration_steps = 275#10000                     # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
     eval_freq = 200000                                # interval in steps for evaluating models on tasks in the environment
     data_buffer_size = n_exploration_steps + 1      # size of the data buffer (FIFO queue)
+    buffer_load_file = None
 
     # misc.
     env = gym.make(env_name)
@@ -192,16 +194,14 @@ Initialization Helpers
 
 
 @ex.capture
-def get_env(env_name, record, env_noise_stdev):
+def get_env(env_name, record, env_noise_stdev, mode='explore'):
     env = gym.make(env_name)
     env = BoundedActionsEnv(env)
 
     if env_noise_stdev:
         env = NoisyEnv(env, stdev=env_noise_stdev)
-
-    if record:
-        env = RecordedEnv(env)
-
+    if mode == 'sac':
+        env = TorchEnv(env)
     return env
 
 
@@ -329,13 +329,17 @@ def get_policy(buffer, model, measure, mode,
         _log.info("... getting fresh agent")
 
     policy_alpha = policy_explore_alpha if mode == 'explore' else policy_exploit_alpha
-
-    agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
-                n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
-                lr=policy_lr, tau=policy_tau)
+    if mode == 'sac':
+        agent = SAC_EX(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, 
+                    n_updates=policy_active_updates, n_hidden=policy_n_hidden)
+    else:
+        agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
+                    n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
+                    lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
-    agent.setup_normalizer(model.normalizer)
+    if mode != 'sac':
+        agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
         return agent
@@ -367,18 +371,39 @@ def get_action(mdp, agent):
     policy_value = torch.mean(agent.get_state_value(current_state)).item()
     return action, mdp, agent, policy_value
 
+
+@ex.capture
+def evaluate_agent(agent, step_num):
+    env = get_env(mode='sac')
+    ep_returns = []
+    ep_return = 0
+    state = env.reset()
+    done = False
+    while not done:
+        action = agent(state, eval=True)
+        next_state, reward, done, _ = env.step(action)
+        ep_return += reward.squeeze().detach().data.cpu().numpy()
+        state = next_state
+    return ep_return
+
+
 @ex.capture
 def train(env, agent, n_train_steps, verbosity, env_horizon, _run, _log): 
     agent.reset_replay()
     ep_returns = []
     n_episodes = int(n_train_steps / env_horizon)
     for ep_i in range(n_episodes):
-        # ep_return = agent.rewrad_episode(env=env, reward_func=reward_function, verbosity=verbosity, _log=_log)
         ep_return = agent.episode(env=TorchEnv(env), verbosity=verbosity, _log=_log)
         ep_returns.append(ep_return)
 
         step_return = ep_return / env_horizon
         _log.info(f"\tep: {ep_i}\taverage step return: {np.round(step_return, 3)}")
+        writer.add_scalar("step_return", step_return, ep_i)
+        
+        task_step_num = 1000 * ep_i
+        avg_return = evaluate_agent(agent, task_step_num)
+        _log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
+        writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
 
     return max(ep_returns)
 
@@ -389,7 +414,7 @@ def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive
 
     mdp = Imagination(horizon=policy_explore_horizon, 
             n_actors=policy_actors, model=model, measure=measure)
-    agent = get_policy(buffer=buffer, model=model, measure=measure, mode='explore')
+    agent = get_policy(buffer=buffer, model=model, measure=measure, mode='sac')
 
     mdp.update_init_state(state)
     
@@ -648,18 +673,27 @@ def evaluate_utility(buffer, exploring_model_epochs, model_train_freq, n_eval_ep
 @ex.capture
 def checkpoint(buffer, step_num, dump_dir, _run):
     buffer_file = f'{dump_dir}/{step_num}.buffer'
-    with gzip.open(buffer_file, 'wb') as f:
-        pickle.dump(buffer, f)
+    #with gzip.open(buffer_file, 'wb') as f:
+    #    pickle.dump(buffer, f)
     _run.add_artifact(buffer_file)
 
 
 """
 Main Functions
 """
+@ex.capture
+def load_checkpoint(buffer_load_file, _run):
+    print ("loading from checkpoint: ", buffer_load_file)
+    with gzip.open(buffer_load_file, 'rb') as f:
+        buffer = pickle.load(f, encoding='latin1')  # load from buffer file
+    step_num = int(buffer_load_file.split('.')[0].split('/', 10)[-1])
+    return buffer, step_num
+
 
 
 @ex.capture
-def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_steps, model_train_freq, exploring_model_epochs,
+def do_max_exploration(seed, buffer_load_file, action_noise_stdev, n_exploration_steps, n_warm_up_steps,
+                       model_train_freq, exploring_model_epochs,
                        eval_freq, checkpoint_frequency, render, record, dump_dir, _config, _log, _run):
 
     env = get_env()
@@ -674,6 +708,11 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         buffer.setup_normalizer(normalizer)
 
     model = None
+    s_num = 1
+    if buffer_load_file is not None:
+        buffer, s_num = load_checkpoint()
+        model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=s_num, mode='explore')
+ 
     mdp = None
     agent = None
     average_performances = []
@@ -684,7 +723,7 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
     else:
         state = env.reset()
 
-    for step_num in range(1, n_exploration_steps + 1):
+    for step_num in range(s_num, n_exploration_steps + 1):
         policy_values = []
         action_norms = []
         if step_num > n_warm_up_steps:
@@ -739,11 +778,6 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
             mdp = None
             agent = None
 
-        # time_to_evaluate = ((step_num % eval_freq) == 0)
-        # if time_to_evaluate or just_finished_warm_up:
-        #     average_performance = evaluate_tasks(buffer=buffer, step_num=step_num)
-        #     average_performances.append(average_performance)
-
         time_to_checkpoint = ((step_num % checkpoint_frequency) == 0)
         if time_to_checkpoint:
             checkpoint(buffer=buffer, step_num=step_num)
@@ -753,9 +787,6 @@ def do_max_exploration(seed, action_noise_stdev, n_exploration_steps, n_warm_up_
         agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
     _log.info(f"starting extrinsic training")
     max_return = train(env=env, agent=agent) 
-
-    if record:
-        _run.add_artifact(video_filename)
 
     return max_return
     # return max(average_performances)
@@ -842,7 +873,7 @@ def main(max_exploration, random_exploration, exploitation, seed, omp_num_thread
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    if max_exploration:
+    if max_exploration: 
         return do_max_exploration()
     elif random_exploration:
         return do_random_exploration()
