@@ -233,6 +233,13 @@ class SAC(nn.Module):
         self.grad_clip = 5
         self.normalizer = None
 
+        print (self.batch_size)
+        print (self.n_updates)
+        print (lr)
+        print (self.gamma)
+        print (self.tau)
+        print (self.alpha)
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -328,9 +335,7 @@ class SAC(nn.Module):
 
             states = next_states
 
-        if train:
             if not warm_up:
-                for _ in range(self.n_updates * ep_length):
-                    self.update()
+                self.update()
 
         return ep_returns
