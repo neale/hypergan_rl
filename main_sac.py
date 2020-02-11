@@ -20,7 +20,6 @@ from utilities import CompoundProbabilityStdevUtilityMeasure, JensenRenyiDiverge
 from normalizer import TransitionNormalizer
 from imagination import Imagination
 
-# from sac import SAC
 from sac_working import SAC
 from sac_exploit import SAC as SAC_EX
 
@@ -36,7 +35,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/cheetah/try_with_rlkit_guassian_policy'
+log_dir = 'runs/mujoco_cheetah/just_sac_old_gaussian1'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -55,13 +54,13 @@ def config():
 # noinspection PyUnusedLocal
 @ex.config
 def env_config():
-    env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
-    # env_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    #env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    env_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
     n_eval_episodes = 3                             # number of episodes evaluated for each task
     env_noise_stdev = 0                             # standard deviation of noise added to state
 
     n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
-    n_exploration_steps = 10001                     # total number of steps (including warm up) of exploration
+    n_exploration_steps = 275#10001                     # total number of steps (including warm up) of exploration
     n_train_steps = 1000000
     env_horizon = 1000
     eval_freq = 200000                                # interval in steps for evaluating models on tasks in the environment
@@ -334,16 +333,16 @@ def get_policy(buffer, model, measure, mode,
 
     policy_alpha = policy_explore_alpha if mode == 'explore' else policy_exploit_alpha
     #if mode == 'sac':
-    # agent = SAC_EX(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, 
-                #n_updates=policy_active_updates, n_hidden=policy_n_hidden)
+    #agent = SAC_EX(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, 
+    #            n_updates=policy_active_updates, n_hidden=policy_n_hidden)
     #else:
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
                 n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
                 lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
-    #if mode != 'sac':
-    agent.setup_normalizer(model.normalizer)
+    # if mode != 'sac':
+    # agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
         return agent
@@ -378,7 +377,8 @@ def get_action(mdp, agent):
 
 @ex.capture
 def evaluate_agent(agent, step_num):
-    env = get_env(mode='test')
+    env = get_env()
+    env = TorchEnv(env)
     ep_returns = []
     ep_return = 0
     state = env.reset()
@@ -404,10 +404,10 @@ def train(env, agent, n_train_steps, verbosity, env_horizon, _run, _log):
         _log.info(f"\tep: {ep_i}\taverage step return: {np.round(step_return, 3)}")
         writer.add_scalar("step_return", step_return, ep_i)
         
-        #task_step_num = 1000 * ep_i
-        #avg_return = evaluate_agent(agent, task_step_num)
-        #_log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
-        #writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
+        task_step_num = 1000 * ep_i
+        avg_return = evaluate_agent(agent, task_step_num)
+        _log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
+        writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
 
     return max(ep_returns)
 
@@ -647,9 +647,11 @@ def do_max_exploration(seed, buffer_load_file, action_noise_stdev, n_exploration
             checkpoint(buffer=buffer, step_num=step_num)
 
     _log.info(f"intrinsic training finished")
-    if agent is None:
-        agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
+    #if agent is None:
+    #    agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
 
+    agent = get_policy(buffer=None, model=None, measure=None, buffer_reuse=False,
+                       policy_batch_size=4096, policy_lr=1e-3, mode='explore')
     _log.info(f"starting extrinsic training")
     max_return = train(env=env, agent=agent) 
 
