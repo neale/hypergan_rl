@@ -18,3 +18,9 @@ python main.py with max_explore env_name=MagellanAnt-v2 env_noise_stdev=0.02 eva
 
 For the purposes of reproduction, the utility is calculated incorrectly in the code. To use the correct version, comment out line 89 in `utilities.py` and uncomment line 90
 
+-----------------------------
+
+## External Reward Update
+
+This is a working branch. For a working version checkout the latest commit titled "check me out" and use the branch "frozen". 
+
