@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
-# from torch.distributions import Normal
+from torch.distributions import Normal
 from distributions import TanhNormal
 
 
@@ -217,11 +217,9 @@ class ActionValueFunction(nn.Module):
     def __init__(self, d_state, d_action, n_hidden):
         super().__init__()
         self.layers = nn.Sequential(ParallelLinear(d_state + d_action, n_hidden, ensemble_size=2),
-                                    nn.ReLU(),
-                                    # nn.LeakyReLU(),
+                                    nn.LeakyReLU(),
                                     ParallelLinear(n_hidden, n_hidden, ensemble_size=2),
-                                    nn.ReLU(),
-                                    # nn.LeakyReLU(),
+                                    nn.LeakyReLU(),
                                     ParallelLinear(n_hidden, 1, ensemble_size=2))
 
     def forward(self, state, action):
@@ -270,16 +268,51 @@ class StateValueFunction(nn.Module):
         init_weights(three)
 
         self.layers = nn.Sequential(one,
-                                    nn.ReLU(),
-                                    # nn.LeakyReLU(),
+                                    nn.LeakyReLU(),
                                     two,
-                                    nn.ReLU(),
-                                    # nn.LeakyReLU(),
+                                    nn.LeakyReLU(),
                                     three)
 
     def forward(self, state):
         result = self.layers(state)
         return result
+
+
+class GaussianPolicy(nn.Module):
+    def __init__(self, d_state, d_action, n_hidden):
+        super().__init__()
+
+        one = nn.Linear(d_state, n_hidden)
+        init_weights(one)
+        two = nn.Linear(n_hidden, n_hidden)
+        init_weights(two)
+        three = nn.Linear(n_hidden, 2 * d_action)
+        init_weights(three)
+
+        self.layers = nn.Sequential(one,
+                                    nn.LeakyReLU(),
+                                    two,
+                                    nn.LeakyReLU(),
+                                    three)
+
+    def forward(self, state):
+        y = self.layers(state)
+        mu, log_std = torch.split(y, y.size(1) // 2, dim=1)
+
+        log_std = torch.tanh(log_std)
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+        std = torch.exp(log_std)
+
+        normal = Normal(mu, std)
+        pi = normal.rsample()           # with re-parameterization
+        logp_pi = normal.log_prob(pi).sum(dim=1, keepdim=True)
+
+        # bounds
+        # mu = torch.tanh(mu)
+        pi = torch.tanh(pi)
+        logp_pi -= torch.sum(torch.log(torch.clamp(1 - pi.pow(2), min=0, max=1) + EPS), dim=1, keepdim=True)
+
+        return pi, logp_pi, mu, log_std
 
 
 class TanhGaussianPolicy(nn.Module):
@@ -312,15 +345,6 @@ class TanhGaussianPolicy(nn.Module):
         # log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         std = torch.exp(log_std)
 
-        # normal = Normal(mu, std)
-        # pi = normal.rsample()           # with re-parameterization
-        # logp_pi = normal.log_prob(pi).sum(dim=1, keepdim=True)
-
-        # # bounds
-        # mu = torch.tanh(mu)
-        # pi = torch.tanh(pi)
-        # logp_pi -= torch.sum(torch.log(torch.clamp(1 - pi.pow(2), min=0, max=1) + EPS), dim=1, keepdim=True)
-
         tanh_normal = TanhNormal(mu, std)
         pi, pre_tanh_value = tanh_normal.rsample(return_pretanh_value=True)
         logp_pi = tanh_normal.log_prob(pi, pre_tanh_value=pre_tanh_value)
@@ -334,8 +358,7 @@ class SAC(nn.Module):
                  n_hidden, n_updates,
                  gamma, tau, reward_scale,
                  batch_size, alpha, lr,
-                 action_space_shape, mode = 'sac',
-                 automatic_entropy_tuning=False):
+                 action_space_shape, mode = 'sac'):
         super().__init__()
         self.d_state = d_state
         self.d_action = d_action
@@ -350,27 +373,26 @@ class SAC(nn.Module):
 
         self.n_updates = n_updates
 
-        self.qf = ActionValueFunction_rlkit(self.d_state, d_action, n_hidden)
-        self.qf_optim = Adam(self.qf.parameters(), lr=lr)
+        if mode == 'sac':
+            self.qf = ActionValueFunction_rlkit(self.d_state, d_action, n_hidden)
+            self.vf = StateValueFunction_rlkit(self.d_state, n_hidden)
+            self.vf_target = StateValueFunction_rlkit(self.d_state, n_hidden)
+            self.policy = TanhGaussianPolicy(self.d_state, d_action, n_hidden)
+        else:
+            self.qf = ActionValueFunction(self.d_state, d_action, n_hidden)
+            self.vf = StateValueFunction(self.d_state, n_hidden)
+            self.vf_target = StateValueFunction(self.d_state, n_hidden)
+            self.policy = GaussianPolicy(self.d_state, d_action, n_hidden)
 
-        self.vf = StateValueFunction_rlkit(self.d_state, n_hidden)
-        self.vf_target = StateValueFunction_rlkit(self.d_state, n_hidden)
+
+        self.qf_optim = Adam(self.qf.parameters(), lr=lr)
         self.vf_optim = Adam(self.vf.parameters(), lr=lr)
         for target_param, param in zip(self.vf_target.parameters(), self.vf.parameters()):
             target_param.data.copy_(param.data)
-
-        self.policy = TanhGaussianPolicy(self.d_state, d_action, n_hidden)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
 
         self.grad_clip = 5
         self.normalizer = None
-
-        self.automatic_entropy_tuning = automatic_entropy_tuning
-        if self.automatic_entropy_tuning:
-            self.target_entropy = -np.prod(action_space_shape).item()
-            self.log_alpha = torch.zeros(1, requires_grad=True)
-            self.alpha_optim = Adam([self.log_alpha], lr=lr)
-            self.reward_scale = 1.
 
     @property
     def device(self):
@@ -383,8 +405,6 @@ class SAC(nn.Module):
         self.qf_optim = Adam(self.qf.parameters(), lr=lr)
         self.vf_optim = Adam(self.vf.parameters(), lr=lr)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
-        if self.automatic_entropy_tuning:
-            self.alpha_optim = Adam([self.log_alpha], lr=lr)
 
     def set_alpha(self, alpha):
         self.alpha = alpha
@@ -418,16 +438,6 @@ class SAC(nn.Module):
         q1_pi, q2_pi = self.qf(states, pi) # 152, 153
         v_pred = self.vf(states) # 117
 
-        # alpha loss
-        if self.automatic_entropy_tuning:
-            alpha_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
-            self.alpha_optim.zero_grad()
-            alpha_loss.backward()
-            self.alpha_optim.step()
-            alpha = self.log_alpha.exp()
-        else:
-            alpha = self.alpha
-
         # target value network
         v_target = self.vf_target(next_states) # 143
 
@@ -436,10 +446,10 @@ class SAC(nn.Module):
 
         # targets for Q and V regression
         q_target = self.reward_scale * rewards + self.gamma * masks * v_target # 144 masks ?= (1-terminals)
-        v_backup = min_q_pi - alpha * logp_pi # 155
+        v_backup = min_q_pi - self.alpha * logp_pi # 155
 
         # policy losses
-        pi_loss = torch.mean(alpha * logp_pi - min_q_pi) # 179
+        pi_loss = torch.mean(self.alpha * logp_pi - min_q_pi) # 179
         pi_loss += 0.001 * mu.pow(2).mean()
         pi_loss += 0.001 * log_std.pow(2).mean()
         # pre_activation_weight=0 so disregard that

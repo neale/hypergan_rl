@@ -396,11 +396,9 @@ def act(state, agent, mdp, buffer, model, mode, measure,
 
     fresh_agent = True if agent is None else False
     if mdp is None:
-        #print ('creating imaginary mdp')
         mdp = Imagination(horizon=policy_explore_horizon, n_actors=policy_actors, model=model, measure=measure)
 
     if fresh_agent:
-        #rint ('getting new agent')
         agent = get_policy(buffer=buffer, model=model, env=mdp, measure=measure, mode=mode)
 
     # update state to current env state
@@ -519,8 +517,8 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
 
         if done:
             _log.info(f"step: {explore_step_num}\tepisode complete")
-            # agent = None
-            # mdp = None
+            agent = None
+            mdp = None
             next_state = env.reset()
 
         state = next_state
@@ -541,9 +539,7 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             checkpoint(buffer=buffer, step_num=explore_step_num)
 
     _log.info(f"intrinsic training finished")
-    mdp = None
-    agent = None
-    _, _, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, 
+    _, _, agent = act(state=state, agent=None, mdp=None, buffer=buffer, 
                       mode='sac', model=model, measure=exploration_measure)
 
     """ extrinsic training stage """
