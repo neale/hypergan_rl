@@ -33,7 +33,7 @@ from logger import get_logger
 
 from torch.utils.tensorboard import SummaryWriter
 
-log_dir = 'runs/cheetah/sac_warmup_magellen1'
+log_dir = 'runs/cheetah/sac_warmup_policy100100upep_5'
 writer = SummaryWriter(log_dir=log_dir)
 
 print ('writing to', log_dir)
@@ -160,7 +160,7 @@ def policy_config():
 
     # exploration
     policy_explore_horizon = 50                     # length of sampled trajectories (planning horizon)
-    policy_explore_episodes = 50                    # number of iterations of SAC before each episode
+    policy_explore_episodes = 100                    # number of iterations of SAC before each episode
     policy_explore_alpha = 0.02                     # entropy scaling factor in SAC for exploration (utility maximisation)
 
     # exploitation
