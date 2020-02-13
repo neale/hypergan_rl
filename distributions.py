@@ -1,4 +1,6 @@
+import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.distributions import Distribution, Normal
 
 
@@ -39,6 +41,9 @@ class TanhNormal(Distribution):
             pre_tanh_value = torch.log(
                 (1+value) / (1-value)
             ) / 2
+        # logp = self.normal.log_prob(pre_tanh_value)
+        # logp -= 2*(np.log(2) - value - F.softplus(-2*value))
+        # return logp
         return self.normal.log_prob(pre_tanh_value) - torch.log(
             1 - value * value + self.epsilon
         )

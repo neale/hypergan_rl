@@ -217,9 +217,11 @@ class ActionValueFunction(nn.Module):
     def __init__(self, d_state, d_action, n_hidden):
         super().__init__()
         self.layers = nn.Sequential(ParallelLinear(d_state + d_action, n_hidden, ensemble_size=2),
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
+                                    # nn.LeakyReLU(),
                                     ParallelLinear(n_hidden, n_hidden, ensemble_size=2),
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
+                                    # nn.LeakyReLU(),
                                     ParallelLinear(n_hidden, 1, ensemble_size=2))
 
     def forward(self, state, action):
@@ -268,9 +270,11 @@ class StateValueFunction(nn.Module):
         init_weights(three)
 
         self.layers = nn.Sequential(one,
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
+                                    # nn.LeakyReLU(),
                                     two,
-                                    nn.LeakyReLU(),
+                                    nn.ReLU(),
+                                    # nn.LeakyReLU(),
                                     three)
 
     def forward(self, state):
@@ -303,9 +307,9 @@ class TanhGaussianPolicy(nn.Module):
         y = self.layers(state)
         mu, log_std = torch.split(y, y.size(1) // 2, dim=1)
 
-        # log_std = torch.tanh(log_std)
-        # log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
-        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        log_std = torch.tanh(log_std)
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+        # log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         std = torch.exp(log_std)
 
         # normal = Normal(mu, std)
@@ -330,7 +334,7 @@ class SAC(nn.Module):
                  n_hidden, n_updates,
                  gamma, tau, reward_scale,
                  batch_size, alpha, lr,
-                 action_space_shape,
+                 action_space_shape, mode = 'sac',
                  automatic_entropy_tuning=False):
         super().__init__()
         self.d_state = d_state
@@ -339,6 +343,7 @@ class SAC(nn.Module):
         self.tau = tau
         self.alpha = alpha
         self.reward_scale = reward_scale
+        self.mode = mode
 
         self.replay = Replay(d_state=d_state, d_action=d_action, size=replay_size)
         self.batch_size = batch_size
@@ -440,8 +445,8 @@ class SAC(nn.Module):
         # pre_activation_weight=0 so disregard that
 
         # QF Loss
-        #q1_loss = 0.5 * F.mse_loss(q1, q_target.detach())
-        #q2_loss = 0.5 * F.mse_loss(q2, q_target.detach())
+        # q1_loss = 0.5 * F.mse_loss(q1, q_target.detach())
+        # q2_loss = 0.5 * F.mse_loss(q2, q_target.detach())
         q1_loss = F.mse_loss(q1, q_target.detach()) # 145
         q2_loss = F.mse_loss(q2, q_target.detach()) # 146
 
@@ -453,18 +458,20 @@ class SAC(nn.Module):
 
         self.policy_optim.zero_grad()
         pi_loss.backward()
-        #torch.nn.utils.clip_grad_value_(self.policy.parameters(), self.grad_clip)
+        if self.mode == 'explore':
+            torch.nn.utils.clip_grad_value_(self.policy.parameters(), self.grad_clip)
         self.policy_optim.step()
 
         self.qf_optim.zero_grad()
         q_loss.backward()
-        #torch.nn.utils.clip_grad_value_(self.qf.parameters(), self.grad_clip)
+        if self.mode == 'explore':
+            torch.nn.utils.clip_grad_value_(self.qf.parameters(), self.grad_clip)
         self.qf_optim.step()
 
         self.vf_optim.zero_grad()
         v_loss.backward()
-        # value_loss.backward()
-        #torch.nn.utils.clip_grad_value_(self.vf.parameters(), self.grad_clip)
+        if self.mode == 'explore':
+            torch.nn.utils.clip_grad_value_(self.vf.parameters(), self.grad_clip)
         self.vf_optim.step()
 
         for target_param, param in zip(self.vf_target.parameters(), self.vf.parameters()):

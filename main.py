@@ -33,7 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 ex = Experiment()
 ex.logger = get_logger('max')
-log_dir = 'runs/cheetah/run_v1'
+log_dir = 'runs/cheetah/run_new'
 writer = SummaryWriter(log_dir=log_dir)
 print ('writing to', log_dir)
 
@@ -80,9 +80,9 @@ def infra_config():
 @ex.config
 def env_config():
     env_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
-    env_exploit_name = 'MagellanHalfCheetah-v2'     # environment out of the defined magellan environments with `Magellan` prefix
     env_noise_stdev = 0                             # standard deviation of noise added to state
-    n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 512                          # number of steps to populate the initial buffer, actions selected randomly
+    n_sac_warm_up_steps = 10000
     n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
     n_task_steps = 990000
     env_horizon = 1000
@@ -110,11 +110,11 @@ def model_arch_config():
 # noinspection PyUnusedLocal
 @ex.config
 def model_training_config():
-    model_train_freq = 25                           # interval in steps for training models. `np.inf`: train after every episode
+    model_train_freq = 25                           # interval in steps for model training. `np.inf`: train after each episode
     exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
-    learning_rate = 1e-4                            # learning rate for training models
+    learning_rate = 2e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
@@ -139,7 +139,7 @@ def policy_config():
     policy_task_batch_size = 256
     policy_task_lr = 3e-4
     policy_task_alpha = 1.0
-    buffer_reuse_task = True                             # transfer the main exploration buffer as off-policy samples to SAC
+    buffer_reuse_task = False                             # transfer the main exploration buffer as off-policy samples to SAC
 
     policy_task_active_updates = 1
     policy_task_train_freq = 1
@@ -325,19 +325,22 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, ver
         policy_batch_size = policy_explore_batch_size
         policy_alpha = policy_explore_alpha 
         policy_lr = policy_explore_lr
-    else:
+    elif mode == 'sac':
         policy_batch_size = policy_task_batch_size
         policy_alpha = policy_task_alpha
         policy_lr = policy_task_lr
+    else:
+        raise Exception('invalid get_policy mode')
 
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size,  
                 n_hidden=policy_n_hidden, n_updates=policy_explore_active_updates,
                 gamma=policy_gamma, tau=policy_tau, reward_scale=policy_reward_scale,
                 batch_size=policy_batch_size, alpha=policy_alpha, lr=policy_lr,
-                action_space_shape=env.action_space.shape)
+                action_space_shape=env.action_space.shape, mode=mode)
 
     agent = agent.to(device)
-    # agent.setup_normalizer(model.normalizer)
+    if mode == 'explore':
+        agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse_explore:
         return agent
@@ -386,7 +389,7 @@ def transfer_buffer_to_agent(buffer, agent, device, verbosity, _log):
     return agent
 
 @ex.capture
-def act(state, agent, mdp, buffer, model, measure,
+def act(state, agent, mdp, buffer, model, mode, measure,
         policy_actors, policy_warm_up_episodes, use_best_policy, 
         policy_explore_reactive_updates, policy_explore_horizon,
         policy_explore_episodes, verbosity, _run, _log):
@@ -398,7 +401,7 @@ def act(state, agent, mdp, buffer, model, measure,
 
     if fresh_agent:
         #rint ('getting new agent')
-        agent = get_policy(buffer=buffer, model=model, env=mdp, measure=measure, mode='explore')
+        agent = get_policy(buffer=buffer, model=model, env=mdp, measure=measure, mode=mode)
 
     # update state to current env state
     mdp.update_init_state(state)
@@ -463,7 +466,8 @@ Main Functions
 
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
-                       n_exploration_steps, n_task_steps, n_warm_up_steps, 
+                       n_exploration_steps, n_task_steps, 
+                       n_warm_up_steps, n_sac_warm_up_steps,
                        model_train_freq, exploring_model_epochs, policy_eval_freq,
                        policy_task_train_freq, policy_task_active_updates, 
                        policy_task_batch_size, policy_task_lr, policy_task_alpha,
@@ -497,7 +501,8 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
         # policy_values = []
         # action_norms = []
         if explore_step_num > n_warm_up_steps:
-            action, mdp, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=exploration_measure)
+            action, mdp, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, 
+                                     mode='explore', model=model, measure=exploration_measure)
             # writer.add_scalar("action_norm", np.sum(np.square(action)), explore_step_num)
             # writer.add_scalar("exploration_policy_value", policy_value, step_num)
 
@@ -536,14 +541,15 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             checkpoint(buffer=buffer, step_num=explore_step_num)
 
     _log.info(f"intrinsic training finished")
-    if agent is None:
-        _, mdp, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, model=model, measure=exploration_measure)
-
+    mdp = None
+    agent = None
+    _, _, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, 
+                      mode='sac', model=model, measure=exploration_measure)
 
     """ extrinsic training stage """
-    agent.set_batch_size(policy_task_batch_size)
-    agent.set_lr(policy_task_lr)
-    agent.set_alpha(policy_task_alpha)
+    # agent.set_batch_size(policy_task_batch_size)
+    # agent.set_lr(policy_task_lr)
+    # agent.set_alpha(policy_task_alpha)
     agent.reset_replay()
     if buffer_reuse_task:
         agent = transfer_buffer_to_agent(buffer, agent)
@@ -561,8 +567,11 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             next_state = env.reset()
         state = next_state
 
+        if task_step_num < n_warm_up_steps:
+            continue
+
         # train task policy
-        if task_step_num % policy_task_train_freq == 0:
+        if task_step_num % policy_task_train_freq == 0 or task_step_num == n_warm_up_steps:
             for _ in range(policy_task_active_updates):
                 agent.update()
 
