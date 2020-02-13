@@ -33,7 +33,7 @@ from logger import get_logger
 
 from torch.utils.tensorboard import SummaryWriter
 
-log_dir = 'runs/cheetah/test_with_torchenv_inline7'
+log_dir = 'runs/cheetah/8k+10k_logging_to_runs5'
 writer = SummaryWriter(log_dir=log_dir)
 
 print ('writing to', log_dir)
@@ -51,7 +51,6 @@ def config():
     exploitation = False
     ant_coverage = False
     rotation_coverage = False
-    # seed = 552325027
 
 # noinspection PyUnusedLocal
 @ex.config
@@ -98,7 +97,7 @@ def infra_config():
     dump_dir = os.path.join(self_dir,
                             'logs',
                             f'{datetime.now().strftime("%Y%m%d%H%M%S")}_{os.getpid()}')
-
+    dump_dir = log_dir + '/log'
     os.makedirs(dump_dir, exist_ok=True)
 
 
@@ -154,6 +153,13 @@ def policy_config():
     policy_exploit_episodes = 250                   # number of iterations of SAC before each episode
     policy_exploit_alpha = 0.4                      # entropy scaling factor in SAC for exploitation (task return maximisation)
 
+    """ task agent parameters """
+    policy_task_batch_size = 256
+    policy_task_lr = 3e-4
+    policy_task_alpha = 1.0
+    buffer_reuse_task = True                             # transfer the main exploration buffer as off-policy samples to SAC
+    policy_task_active_updates = 1
+    policy_task_train_freq = 1
 
 # noinspection PyUnusedLocal
 @ex.config
@@ -331,17 +337,12 @@ def get_policy(buffer, model, measure, mode,
     if verbosity:
         _log.info("... getting fresh agent")
 
-    policy_alpha = policy_explore_alpha if mode == 'explore' else policy_exploit_alpha
-    #if mode == 'sac':
-    # agent = SAC_EX(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, 
-                #n_updates=policy_active_updates, n_hidden=policy_n_hidden)
-    #else:
-    agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size, batch_size=policy_batch_size,
-                n_updates=policy_active_updates, n_hidden=policy_n_hidden, gamma=policy_gamma, alpha=policy_alpha,
-                lr=policy_lr, tau=policy_tau)
+    agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size,
+                batch_size=policy_batch_size,
+                n_updates=policy_active_updates, n_hidden=policy_n_hidden,
+                gamma=policy_gamma, alpha=policy_explore_alpha, lr=policy_lr, tau=policy_tau)
 
     agent = agent.to(device)
-    #if mode != 'sac':
     agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
@@ -418,7 +419,13 @@ def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive
 
     mdp = Imagination(horizon=policy_explore_horizon, 
             n_actors=policy_actors, model=model, measure=measure)
-    agent = get_policy(buffer=buffer, model=model, measure=measure, mode='sac')#, buffer_reuse=True)
+    if mode == 'explore':
+        agent = get_policy(buffer=buffer, model=model, measure=measure)
+    else:
+        agent = get_policy(buffer=buffer, model=model, measure=measure,
+                           policy_lr=policy_task_lr, policy_batch_size=policy_task_batch_size,
+                           policy_explore_alpha=policy_task_alpha, policy_tau=policy_task_tau)
+        
 
     mdp.update_init_state(state)
     
@@ -648,7 +655,8 @@ def do_max_exploration(seed, buffer_load_file, action_noise_stdev, n_exploration
 
     _log.info(f"intrinsic training finished")
     if agent is None:
-        agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
+        agent = imagined_train(state=state, buffer=buffer, model=model,
+                               measure=exploration_measure, mode='explore')
 
     _log.info(f"starting extrinsic training")
     max_return = train(env=env, agent=agent) 
