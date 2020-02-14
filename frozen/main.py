@@ -33,7 +33,7 @@ from logger import get_logger
 
 from torch.utils.tensorboard import SummaryWriter
 
-log_dir = 'runs/cheetah/test_with_torchenv_inline7'
+log_dir = 'runs/cheetah/trial_with_working7'
 writer = SummaryWriter(log_dir=log_dir)
 
 print ('writing to', log_dir)

@@ -33,7 +33,7 @@ from logger import get_logger
 
 from torch.utils.tensorboard import SummaryWriter
 
-log_dir = 'runs/cheetah/continue_sac_no_warmup_nonorm14'
+log_dir = 'runs/cheetah/switch_sac__sameHP_8k_policy2'
 writer = SummaryWriter(log_dir=log_dir)
 
 print ('writing to', log_dir)
@@ -66,7 +66,7 @@ def env_config():
 
     exploration_warmup = 'random'
 
-    n_warm_up_steps = 0#10000#256                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 10000#256                          # number of steps to populate the initial buffer, actions selected randomly
     n_sac_warm_up_steps = 10001
     n_exploration_steps = 10001                     # total number of steps (including warm up) of exploration
     n_train_steps = 990000
@@ -444,8 +444,8 @@ def get_policy(buffer, model, measure, mode, policy_task_alpha, policy_task_tau,
 
     agent = agent.to(device)
 
-    if mode == 'explore':
-        agent.setup_normalizer(model.normalizer)
+    # if mode == 'explore':
+    agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse:
         return agent
@@ -626,7 +626,7 @@ def do_training_from_buffer(seed, buffer_load_file, exploration_warmup, explorin
 
     _log.info(f"Starting Training Agent with Models")
     agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure,
-                               mode='explore')
+                               mode='sac')
     _log.info(f'Warming Up After Imaginary Training')
     agent.reset_replay()
     env = TorchEnv(env)
