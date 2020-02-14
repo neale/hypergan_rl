@@ -79,7 +79,7 @@ def infra_config():
 # noinspection PyUnusedLocal
 @ex.config
 def env_config():
-    env_name = 'HalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
+    env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
     env_noise_stdev = 0                             # standard deviation of noise added to state
     n_warm_up_steps = 512                          # number of steps to populate the initial buffer, actions selected randomly
     n_sac_warm_up_steps = 10000
@@ -197,7 +197,8 @@ Mixing Envs is hard since Magellan has two more states than HalfCheetah """
 @ex.capture
 def get_env(env_name): #, env_exploit_name, record, env_noise_stdev, mode='explore'):
     env = gym.make(env_name)
-    env = NormalizedBoxEnv(env)
+    env = BoundedActionsEnv(env)
+    # env = NormalizedBoxEnv(env)
     env = TorchEnv(env)
     return env
 
