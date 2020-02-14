@@ -33,7 +33,7 @@ from logger import get_logger
 
 from torch.utils.tensorboard import SummaryWriter
 
-log_dir = 'runs/cheetah/sac_warmup_policy100100upep_5'
+log_dir = 'runs/cheetah/continue_sac_no_warmup_nonorm14'
 writer = SummaryWriter(log_dir=log_dir)
 
 print ('writing to', log_dir)
@@ -66,7 +66,7 @@ def env_config():
 
     exploration_warmup = 'random'
 
-    n_warm_up_steps = 10000#256                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 0#10000#256                          # number of steps to populate the initial buffer, actions selected randomly
     n_sac_warm_up_steps = 10001
     n_exploration_steps = 10001                     # total number of steps (including warm up) of exploration
     n_train_steps = 990000
@@ -147,7 +147,7 @@ def policy_config():
 
     policy_replay_size = int(1e7)                   # SAC replay size
     policy_batch_size = 4096                        # SAC training batch size
-    policy_reactive_updates = 100                   # number of SAC off-policy updates of `batch_size`
+    policy_reactive_updates = 50                   # number of SAC off-policy updates of `batch_size`
     policy_active_updates = 1                       # number of SAC on-policy updates per step in the imagination/environment
 
     policy_n_hidden = 256                           # policy hidden size (2 layers)
@@ -160,7 +160,7 @@ def policy_config():
 
     # exploration
     policy_explore_horizon = 50                     # length of sampled trajectories (planning horizon)
-    policy_explore_episodes = 100                    # number of iterations of SAC before each episode
+    policy_explore_episodes = 50                    # number of iterations of SAC before each episode
     policy_explore_alpha = 0.02                     # entropy scaling factor in SAC for exploration (utility maximisation)
 
     # exploitation
@@ -169,13 +169,13 @@ def policy_config():
     policy_exploit_alpha = 0.4                      # entropy scaling factor in SAC for exploitation (task return maximisation)
 
     # task
-    policy_task_lr = 3e-4
+    policy_task_lr = 1e-3 # 3e-4
     policy_task_gamma = 0.99
     policy_task_tau = 0.005
-    policy_task_batch_size = 256
+    policy_task_batch_size = 4096 # 256
     policy_task_hidden = 256
-    policy_task_alpha = 1.
-    reward_scale = 5.
+    policy_task_alpha = 0.02# 1.
+    reward_scale = 1. # 5.
 
 # noinspection PyUnusedLocal
 @ex.config
@@ -229,15 +229,12 @@ Initialization Helpers
 
 
 @ex.capture
-def get_env(env_name, env_task_name, mode=None):
-    if mode == 'explore':
-        env = gym.make(env_name)
-        env = BoundedActionsEnv(env)
-    elif mode == 'sac':
-        env = gym.make(env_name)
+def get_env(env_name, mode='explore'):
+    env = gym.make(env_name)
+    if mode == 'sac':
         env = NormalizedBoxEnv(env)
     else:
-        raise NotImplementedError
+        env = BoundedActionsEnv(env)
     #if env_noise_stdev:
     #    env = NoisyEnv(env, stdev=env_noise_stdev)
     return env
@@ -523,7 +520,7 @@ Main Functions
 
 @ex.capture
 def evaluate_agent(agent, n_eval_episodes):
-    env = get_env(mode='sac')
+    env = get_env()
     env = TorchEnv(env)
     ep_returns = []
     for ep_idx in range(n_eval_episodes):
@@ -541,7 +538,6 @@ def evaluate_agent(agent, n_eval_episodes):
 
 @ex.capture
 def train(env, agent, n_train_steps, verbosity, env_horizon, n_sac_warm_up_steps, _run, _log): 
-    # agent.reset_replay()
     ep_returns = []
     n_episodes = int(n_train_steps / env_horizon)
     n_warm_up_episodes = int(n_sac_warm_up_steps / env_horizon)
@@ -563,12 +559,12 @@ def train(env, agent, n_train_steps, verbosity, env_horizon, n_sac_warm_up_steps
 
 @ex.capture
 def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive_updates,
-        policy_warm_up_episodes, policy_explore_horizon, policy_explore_episodes, 
+        policy_warm_up_episodes, policy_explore_horizon, policy_explore_episodes, mode,
         verbosity, _run, _log):
 
     mdp = Imagination(horizon=policy_explore_horizon, 
             n_actors=policy_actors, model=model, measure=measure)
-    agent = get_policy(buffer=buffer, model=model, measure=measure, mode='sac')
+    agent = get_policy(buffer=buffer, model=model, measure=measure, mode=mode)
 
     mdp.update_init_state(state)
     
@@ -579,15 +575,15 @@ def imagined_train(state, buffer, model, measure, policy_actors, policy_reactive
     # active training
     agent.reset_replay()
     for ep_i in range(policy_explore_episodes):
-        # warm_up = True if (ep_i < policy_warm_up_episodes) else False
-        ep_return = agent.episode(env=mdp, warm_up=False, verbosity=verbosity, _log=_log)
+        warm_up = True if (ep_i < policy_warm_up_episodes) else False
+        ep_return = agent.episode(env=mdp, warm_up=warm_up, verbosity=verbosity, _log=_log)
 
     return agent
     
 @ex.capture
 def do_sac_training(seed, n_warm_up_steps, device, _config, _log, _run):
 
-    env = get_env(mode='sac')
+    env = get_env('sac')
     env = TorchEnv(env)
     env.seed(seed)
     atexit.register(lambda: env.close())
@@ -614,22 +610,28 @@ def do_training_from_buffer(seed, buffer_load_file, exploration_warmup, explorin
                             n_warm_up_steps, device, d_state_task, d_action_task, d_action_space_task,
                             _config, _log, _run):
     
+    buffer = get_buffer()
+    exploration_measure = get_utility_measure()
+    if _config['normalize_data']:
+        normalizer = TransitionNormalizer()
+        buffer.setup_normalizer(normalizer)
     if buffer_load_file is not None:
         buffer, s_num = load_checkpoint()
         _log.info(f"Retrained Model from Loaded Buffer")
         model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=s_num, mode='explore')
     
-    env = get_env(mode='explore')
+    env = get_env()
     state = env.reset()
+    atexit.register(lambda: env.close())
+
     _log.info(f"Starting Training Agent with Models")
-    exploration_measure = get_utility_measure()
-    agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure)
-    
+    agent = imagined_train(state=state, buffer=buffer, model=model, measure=exploration_measure,
+                               mode='explore')
     _log.info(f'Warming Up After Imaginary Training')
-    sac_env = TorchEnv(get_env(mode='sac'))
-    state = sac_env.reset()
     agent.reset_replay()
-    for _ in range(n_warm_up_steps+1):
+    env = TorchEnv(env)
+    state = env.reset()
+    for _ in range(1, n_warm_up_steps+1):
         if exploration_warmup == 'random':
             action = env.action_space.sample()
             action = torch.from_numpy(action).float().to(device)
@@ -638,14 +640,14 @@ def do_training_from_buffer(seed, buffer_load_file, exploration_warmup, explorin
             with torch.no_grad():
                 action = agent(state)
 
-        next_state, reward, done, _ = sac_env.step(action)
+        next_state, reward, done, _ = env.step(action)
         agent.replay.add(state, action, reward, next_state)
         if done:
-            next_state = sac_env.reset()
+            next_state = env.reset()
         state = next_state
     _log.info(f"starting pure sac after warm up")
-
-    max_return = train(env=sac_env, agent=agent) 
+    # agent.transfer_replay(agent.replay)
+    max_return = train(env=env, agent=agent) 
     return max_return
 
 
@@ -654,7 +656,7 @@ def do_max_exploration(seed, buffer_load_file, action_noise_stdev, n_exploration
                        model_train_freq, exploring_model_epochs, device,
                        eval_freq, checkpoint_frequency, render, record, dump_dir, _config, _log, _run):
 
-    env = get_env(mode='explore')
+    env = get_env()
     env.seed(seed)
     atexit.register(lambda: env.close())
 
