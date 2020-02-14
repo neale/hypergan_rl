@@ -313,7 +313,7 @@ Planning
 """
 
 @ex.capture
-def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, verbosity, _log,
+def get_policy(buffer, model, measure, mode, d_state, d_action, device, verbosity, _log,
                policy_n_hidden, policy_replay_size, policy_gamma, policy_tau, policy_reward_scale, # common params
                policy_task_batch_size, policy_task_lr, policy_task_alpha, # task params
                policy_explore_batch_size, policy_explore_lr, policy_explore_alpha, # explore params
@@ -336,8 +336,7 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, ver
     agent = SAC(d_state=d_state, d_action=d_action, replay_size=policy_replay_size,  
                 n_hidden=policy_n_hidden, n_updates=policy_explore_active_updates,
                 gamma=policy_gamma, tau=policy_tau, reward_scale=policy_reward_scale,
-                batch_size=policy_batch_size, alpha=policy_alpha, lr=policy_lr,
-                action_space_shape=env.action_space.shape, mode=mode)
+                batch_size=policy_batch_size, alpha=policy_alpha, lr=policy_lr, mode=mode)
 
     agent = agent.to(device)
     if mode == 'explore':
@@ -400,7 +399,7 @@ def act(state, agent, mdp, buffer, model, mode, measure,
         mdp = Imagination(horizon=policy_explore_horizon, n_actors=policy_actors, model=model, measure=measure)
 
     if fresh_agent:
-        agent = get_policy(buffer=buffer, model=model, env=mdp, measure=measure, mode=mode)
+        agent = get_policy(buffer=buffer, model=model, measure=measure, mode=mode)
 
     # update state to current env state
     mdp.update_init_state(state)
@@ -540,24 +539,28 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             checkpoint(buffer=buffer, step_num=explore_step_num)
 
     _log.info(f"intrinsic training finished")
-    _, _, agent = act(state=state, agent=None, mdp=None, buffer=buffer, 
-                      mode='sac', model=model, measure=exploration_measure)
+    _, _, agent = act(state=state, agent=agent, mdp=mdp, buffer=buffer, 
+                      mode='explore', model=model, measure=exploration_measure)
+    task_agent = get_policy(buffer=buffer, model=model, measure=exploration_measure, 
+                       mode='sac', buffer_reuse_explore=False)
 
     """ extrinsic training stage """
-    # agent.set_batch_size(policy_task_batch_size)
-    # agent.set_lr(policy_task_lr)
-    # agent.set_alpha(policy_task_alpha)
-    agent.reset_replay()
+    task_agent.reset_replay()
     if buffer_reuse_task:
-        agent = transfer_buffer_to_agent(buffer, agent)
+        task_agent = transfer_buffer_to_agent(buffer, task_agent)
 
     _log.info(f"starting extrinsic training")
     ep_returns = []
     for task_step_num in range(1, n_task_steps + 1):
-        with torch.no_grad():
-            action = agent(state)
+        if task_step_num > n_sac_warm_up_steps:
+            with torch.no_grad():
+                action = task_agent(state)
+        else:
+            with torch.no_grad():
+                action = agent(state)
+
         next_state, reward, done, _ = env.step(action)
-        agent.replay.add(state, action, reward, next_state)
+        task_agent.replay.add(state, action, reward, next_state)
 
         if done:
             _log.info(f"task_step: {task_step_num}\tepisode complete")
@@ -570,11 +573,11 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
         # train task policy
         if task_step_num % policy_task_train_freq == 0 or task_step_num == n_warm_up_steps:
             for _ in range(policy_task_active_updates):
-                agent.update()
+                task_agent.update()
 
         # evaluate task policy
         if task_step_num % policy_eval_freq == 0:
-            avg_return = evaluate_agent(agent, task_step_num)
+            avg_return = evaluate_agent(task_agent, task_step_num)
             _log.info(f"task_step: {task_step_num}, evaluate:\taverage_return = {np.round(avg_return, 4)}")
             writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
             ep_returns.append(avg_return)

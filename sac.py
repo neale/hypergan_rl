@@ -358,7 +358,7 @@ class SAC(nn.Module):
                  n_hidden, n_updates,
                  gamma, tau, reward_scale,
                  batch_size, alpha, lr,
-                 action_space_shape, mode = 'sac'):
+                 mode = 'sac'):
         super().__init__()
         self.d_state = d_state
         self.d_action = d_action
