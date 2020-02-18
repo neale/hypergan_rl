@@ -81,13 +81,15 @@ def infra_config():
 def env_config():
     env_name = 'MagellanHalfCheetah-v2'             # environment out of the defined magellan environments with `Magellan` prefix
     env_noise_stdev = 0                             # standard deviation of noise added to state
-    n_warm_up_steps = 512                          # number of steps to populate the initial buffer, actions selected randomly
+    n_warm_up_steps = 256                          # number of steps to populate the initial buffer, actions selected randomly
     n_sac_warm_up_steps = 10000
     n_exploration_steps = 10000                     # total number of steps (including warm up) of exploration
     n_task_steps = 990000
     env_horizon = 1000
     data_buffer_size = int(1e+6) + 1      # size of the data buffer (FIFO queue)
     action_noise_stdev = 0                          # noise added to actions
+
+    sac_warm_up_policy = 'random'
 
     buffer_load_file = None                         # exact path to load a buffer (checkpoint)
 
@@ -111,14 +113,14 @@ def model_arch_config():
 @ex.config
 def model_training_config():
     model_train_freq = 25                           # interval in steps for model training. `np.inf`: train after each episode
-    exploring_model_epochs = 100                    # number of training epochs in each training phase during exploration
+    exploring_model_epochs = 50                    # number of training epochs in each training phase during exploration
     evaluation_model_epochs = 200                   # number of training epochs for evaluating the tasks
     batch_size = 256                                # batch size for training models
     learning_rate = 2e-4                            # learning rate for training models
     normalize_data = True                           # normalize states, actions, next states to zero mean and unit variance
     weight_decay = 1e-5                                # L2 weight decay on model parameters (good: 1e-5, default: 0)
     training_noise_stdev = 0                        # standard deviation of training noise applied on states, actions, next states
-    grad_clip = 4                                   # gradient clipping to train model
+    grad_clip = 5                                   # gradient clipping to train model
 
 
 # noinspection PyUnusedLocal
@@ -131,14 +133,14 @@ def policy_config():
     policy_replay_size = int(1e6) + 1                   # SAC replay size
     policy_gamma = 0.99                             # discount factor for SAC
     policy_tau = 0.005                              # soft target network update mixing factor
-    policy_reward_scale = 5
     policy_eval_freq = 500                                # interval in steps for evaluating models on tasks in the environment
     n_policy_eval_episodes = 3                             # number of episodes evaluated for each task
 
     """ task agent parameters """
-    policy_task_batch_size = 256
-    policy_task_lr = 3e-4
-    policy_task_alpha = 1.0
+    policy_task_batch_size = 4096 #256
+    policy_task_lr = 1e-3 #3e-4
+    policy_task_reward_scale = 1. #5.
+    policy_task_alpha = 0.02 #1.
     buffer_reuse_task = False                             # transfer the main exploration buffer as off-policy samples to SAC
 
     policy_task_active_updates = 1
@@ -147,7 +149,8 @@ def policy_config():
     """ explore agent parameters """
     policy_explore_batch_size = 4096                        # SAC training batch size
     policy_explore_lr = 1e-3                                # SAC learning rate
-    policy_explore_alpha = 0.1                     # entropy scaling factor in SAC for exploration (utility maximisation)
+    policy_explore_reward_scale = 1.
+    policy_explore_alpha = 0.02                     # entropy scaling factor in SAC for exploration (utility maximisation)
     buffer_reuse_explore = True                             # transfer the main exploration buffer as off-policy samples to SAC
 
     policy_explore_active_updates = 1               # number of SAC on-policy updates per step in the imagination/environment
@@ -314,9 +317,9 @@ Planning
 
 @ex.capture
 def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, verbosity, _log,
-               policy_n_hidden, policy_replay_size, policy_gamma, policy_tau, policy_reward_scale, # common params
-               policy_task_batch_size, policy_task_lr, policy_task_alpha, # task params
-               policy_explore_batch_size, policy_explore_lr, policy_explore_alpha, # explore params
+               policy_n_hidden, policy_replay_size, policy_gamma, policy_tau, # common params
+               policy_task_batch_size, policy_task_lr, policy_task_alpha, policy_task_reward_scale,# task params
+               policy_explore_batch_size, policy_explore_lr, policy_explore_alpha, policy_explore_reward_scale, # explore params
                policy_explore_active_updates, buffer_reuse_explore): 
 
     if verbosity:
@@ -326,10 +329,12 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, ver
         policy_batch_size = policy_explore_batch_size
         policy_alpha = policy_explore_alpha 
         policy_lr = policy_explore_lr
+        policy_reward_scale = policy_explore_reward_scale
     elif mode == 'sac':
         policy_batch_size = policy_task_batch_size
         policy_alpha = policy_task_alpha
         policy_lr = policy_task_lr
+        policy_reward_scale = policy_task_reward_scale
     else:
         raise Exception('invalid get_policy mode')
 
@@ -340,8 +345,8 @@ def get_policy(buffer, model, env, measure, mode, d_state, d_action, device, ver
                 action_space_shape=env.action_space.shape, mode=mode)
 
     agent = agent.to(device)
-    if mode == 'explore':
-        agent.setup_normalizer(model.normalizer)
+    # if mode == 'explore':
+    agent.setup_normalizer(model.normalizer)
 
     if not buffer_reuse_explore:
         return agent
@@ -462,11 +467,10 @@ def load_checkpoint(buffer_load_file, _run):
 Main Functions
 """
 
-
 @ex.capture
 def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
                        n_exploration_steps, n_task_steps, 
-                       n_warm_up_steps, n_sac_warm_up_steps,
+                       n_warm_up_steps, n_sac_warm_up_steps, sac_warm_up_policy,
                        model_train_freq, exploring_model_epochs, policy_eval_freq,
                        policy_task_train_freq, policy_task_active_updates, 
                        policy_task_batch_size, policy_task_lr, policy_task_alpha,
@@ -476,6 +480,7 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
     env = get_env()
     env.seed(seed)
     atexit.register(lambda: env.close())
+    _log.info(f"sac_warm_up_policy:\t{sac_warm_up_policy}")
 
     buffer = get_buffer()
     exploration_measure = get_utility_measure()
@@ -486,7 +491,7 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
 
     model = None
 
-    step_num = 1
+    step_num = 0
     if buffer_load_file is not None:
         buffer, step_num = load_checkpoint()
         model = fit_model(buffer=buffer, n_epochs=exploring_model_epochs, step_num=step_num)
@@ -496,7 +501,7 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
 
     """ intrinsic training stage """
     state = env.reset()
-    for explore_step_num in range(step_num, n_exploration_steps + 1):
+    for explore_step_num in range(step_num + 1, n_exploration_steps + 1):
         # policy_values = []
         # action_norms = []
         if explore_step_num > n_warm_up_steps:
@@ -544,9 +549,6 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
                       mode='sac', model=model, measure=exploration_measure)
 
     """ extrinsic training stage """
-    # agent.set_batch_size(policy_task_batch_size)
-    # agent.set_lr(policy_task_lr)
-    # agent.set_alpha(policy_task_alpha)
     agent.reset_replay()
     if buffer_reuse_task:
         agent = transfer_buffer_to_agent(buffer, agent)
@@ -554,8 +556,13 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
     _log.info(f"starting extrinsic training")
     ep_returns = []
     for task_step_num in range(1, n_task_steps + 1):
-        with torch.no_grad():
-            action = agent(state)
+        if task_step_num <= n_sac_warm_up_steps and sac_warm_up_policy == 'random':
+            action = env.action_space.sample()
+            action = torch.from_numpy(action).float().to(device)
+            action = action.unsqueeze(0) 
+        else:
+            with torch.no_grad():
+                action = agent(state)
         next_state, reward, done, _ = env.step(action)
         agent.replay.add(state, action, reward, next_state)
 
@@ -564,11 +571,11 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             next_state = env.reset()
         state = next_state
 
-        if task_step_num < n_warm_up_steps:
+        if task_step_num < n_sac_warm_up_steps:
             continue
 
         # train task policy
-        if task_step_num % policy_task_train_freq == 0 or task_step_num == n_warm_up_steps:
+        if task_step_num % policy_task_train_freq == 0 or task_step_num == n_sac_warm_up_steps:
             for _ in range(policy_task_active_updates):
                 agent.update()
 
@@ -579,8 +586,8 @@ def do_max_exploration(seed, action_noise_stdev, buffer_load_file,
             writer.add_scalar(f"evaluate_return", avg_return, task_step_num)
             ep_returns.append(avg_return)
 
+    _log.info(f"sac_warm_up_policy:\t{sac_warm_up_policy}")
     return max(ep_returns)
-    # return max(average_performances)
 
 
 @ex.automain
